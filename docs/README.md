@@ -65,6 +65,7 @@
 
 | Example | Description |
 | ------- | ----------- |
+| [Connect Session Until Ready](./examples/session-connect-until-ready.md) | Create a session, understand all statuses, get QR or pairing code, poll until `ready` |
 | [Session Phone-Number Pairing](./examples/session-phone-number-pairing.md) | Link an existing WhatsApp account by phone number instead of scanning QR |
 | [Chat History Limits](./examples/chat-history-limits.md) | Understand local message history vs bounded live WhatsApp history |
 | [Webhook Signature Verification](./examples/webhook-signature-verification.md) | Verify signed OpenWA webhook deliveries in Node.js and Python |
