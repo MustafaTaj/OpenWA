@@ -1,6 +1,8 @@
 # Connect a Session: Create → QR / Pairing Code → Ready
 
-This guide walks through the full OpenWA session lifecycle: create a session, understand every status, start the engine, authenticate with a **QR code** or **pairing code**, and poll until the session is `ready`.
+Tutorial for the full OpenWA session lifecycle: create a session, start the engine, authenticate with a **QR code** or **pairing code**, and poll until the session is `ready`.
+
+For request/response schemas, field constraints, and HTTP status codes, see the [API Specification — Sessions](../06-api-specification.md) and interactive Swagger at `$BASE_URL/api/docs`.
 
 Replace placeholders:
 
@@ -10,12 +12,7 @@ Replace placeholders:
 | `API_KEY` | Admin / OPERATOR API key (`API_MASTER_KEY` or a key from the dashboard) |
 | `SESSION_ID` | UUID returned by `POST /api/sessions` |
 
-All requests need:
-
-```http
-X-API-Key: $API_KEY
-Content-Type: application/json
-```
+All requests need the `X-API-Key` header (and `Content-Type: application/json` on bodies).
 
 ---
 
@@ -42,35 +39,29 @@ Content-Type: application/json
             ready   ← you can send/receive messages
 ```
 
----
-
-## Session statuses explained
-
-Wire values are **lowercase**. Poll `GET /api/sessions/:id` (or listen to WebSocket/webhook session events) to observe transitions.
-
-| Status | Meaning | What you should do |
-| ------ | ------- | ------------------ |
-| `created` | Session row exists in the database. WhatsApp engine is **not** running. | Call `POST /api/sessions/:id/start`. |
-| `initializing` | Engine is starting (Chromium / Baileys socket). No QR yet, or QR not ready to fetch. | Wait a few seconds, then poll status or retry QR. |
-| `qr_ready` | A QR (and optionally a pairing code) is available for linking. | Fetch QR and/or request a pairing code; scan or enter the code on the phone. |
-| `authenticating` | User scanned the QR or entered the pairing code; WhatsApp is finishing the link. | Keep polling; do not restart unless it fails. |
-| `ready` | Session is linked and online. `phone` / `pushName` are usually filled. | Send messages, manage chats, etc. |
-| `disconnected` | Engine stopped or lost connection (manual stop, logout, network, restart). Auth data may still exist — restart often reconnects without a new QR. | Call `start` again, or create a new session if credentials were cleared. |
-| `failed` | Terminal error (engine crash, reconnect exhausted, bad proxy, etc.). Check `lastError` on the session. | Inspect logs / `lastError`, fix the cause, then `start` again or recreate the session. |
-
-### Typical happy path
+**Status transitions to expect**
 
 ```
 created → initializing → qr_ready → authenticating → ready
 ```
 
-### After a normal stop or server restart
+After a normal stop or server restart (credentials still on disk):
 
 ```
 ready → disconnected → (start) → initializing → ready
 ```
 
-(If session credentials are still on disk, you often skip QR and go straight back to `ready`.)
+Poll `GET /api/sessions/:id` and act on `status` / `lastError`. Full status definitions live in [§06](../06-api-specification.md) (`created | initializing | qr_ready | authenticating | ready | disconnected | failed`).
+
+| When status is… | Do this |
+| --------------- | ------- |
+| `created` | Call `POST .../start` |
+| `initializing` | Wait; do not fetch QR yet |
+| `qr_ready` | Fetch QR and/or request a pairing code |
+| `authenticating` | Keep polling; do not restart |
+| `ready` | Send/receive messages |
+| `disconnected` | Call `start` again (often no new QR) |
+| `failed` | Check `lastError` and logs, then restart or recreate |
 
 ---
 
@@ -80,32 +71,14 @@ ready → disconnected → (start) → initializing → ready
 curl -X POST "$BASE_URL/api/sessions" \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-bot"
-  }'
+  -d '{"name": "my-bot"}'
 ```
 
-**Rules for `name`:** 3–50 characters; letters, numbers, and hyphens only (`^[a-zA-Z0-9-]+$`). Duplicate names return `409`.
+Save the returned `id` as `SESSION_ID`.
 
-**Example response** `201`:
+> **Shape note:** `POST /api/sessions` returns the **raw session entity**, including `config`, `proxyUrl`, `proxyType`, and `lastActiveAt`. Later reads (`GET /api/sessions/:id`, `start`, etc.) use `SessionResponseDto`, which strips those fields and renames `lastActiveAt` → `lastActive`. Prefer `GET` when you only care about status. Full schemas: [§06](../06-api-specification.md) / `$BASE_URL/api/docs`.
 
-```json
-{
-  "id": "8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a",
-  "name": "my-bot",
-  "status": "created",
-  "phone": null,
-  "pushName": null,
-  "connectedAt": null,
-  "lastActiveAt": null,
-  "createdAt": "2026-06-25T09:00:00.000Z",
-  "updatedAt": "2026-06-25T09:00:00.000Z"
-}
-```
-
-Save `id` as `SESSION_ID`.
-
-> Leave `proxyUrl` unset unless you use a real reachable proxy. A bad proxy blocks WhatsApp forever — **no QR** and `start` can time out with `504`.
+> Leave `proxyUrl` unset unless you use a real reachable proxy. A bad proxy blocks WhatsApp forever — **no QR**, and `start` can time out with `504`.
 
 ---
 
@@ -116,29 +89,12 @@ curl -X POST "$BASE_URL/api/sessions/$SESSION_ID/start" \
   -H "X-API-Key: $API_KEY"
 ```
 
-**Example response** `200`:
-
-```json
-{
-  "id": "8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a",
-  "name": "my-bot",
-  "status": "initializing",
-  "phone": null,
-  "pushName": null,
-  "lastError": null
-}
-```
-
-Status then moves to `qr_ready` (first link) or quickly to `ready` (already linked).
-
-Poll status:
+Poll until `qr_ready` (first link) or `ready` (already linked):
 
 ```bash
 curl -s "$BASE_URL/api/sessions/$SESSION_ID" \
-  -H "X-API-Key: $API_KEY" | jq '.status, .lastError'
+  -H "X-API-Key: $API_KEY" | jq '{status, lastError, phone, lastActive}'
 ```
-
-Wait until status is `qr_ready` (or `ready` if already authenticated).
 
 ---
 
@@ -148,85 +104,37 @@ Once status is `qr_ready`:
 
 ```bash
 curl -s "$BASE_URL/api/sessions/$SESSION_ID/qr" \
-  -H "X-API-Key: $API_KEY"
+  -H "X-API-Key: $API_KEY" | jq -r '.qrCode'
 ```
 
-**Example response** `200`:
+`qrCode` is a PNG **data URL** (`data:image/png;base64,...`). Show it in an `<img>`, decode to a file, or open it for a manual scan.
 
-```json
-{
-  "qrCode": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-  "status": "qr_ready"
-}
-```
+**On the phone:** WhatsApp → **Settings → Linked devices → Link a device** → scan the QR.
 
-`qrCode` is a PNG **data URL**. You can:
+After scan, status moves to `authenticating`, then `ready`.
 
-- Show it in a browser/dashboard `<img src="...">`
-- Decode the base64 and save a PNG file
-- Open it temporarily for manual scan
-
-**On the phone:**
-
-1. Open WhatsApp  
-2. **Settings → Linked devices → Link a device**  
-3. Scan the QR  
-
-After scan, status becomes `authenticating`, then `ready`.
-
-**Common errors on `/qr`:**
-
-| Error | Cause |
-| ----- | ----- |
-| Session not started | Call `/start` first |
-| QR not ready yet | Still `initializing` — wait and retry |
-| Already authenticated | Session is already `ready` — no QR needed |
+If `/qr` fails: session not started, still `initializing`, or already authenticated — see [§06 QR endpoint](../06-api-specification.md).
 
 ---
 
 ## 3b. Authenticate with pairing code (no camera)
 
-Alternative to QR. Session must already be started (usually `qr_ready`).
+Session must already be started (usually `qr_ready`). `phoneNumber` is digits only, international format (no `+` / spaces / dashes).
 
 ```bash
 curl -X POST "$BASE_URL/api/sessions/$SESSION_ID/pairing-code" \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "phoneNumber": "628123456789"
-  }'
+  -d '{"phoneNumber": "628123456789"}'
 ```
 
-`phoneNumber`: digits only, international format, **no** `+`, spaces, or dashes (6–15 digits).
+**On the phone:** WhatsApp → **Settings → Linked devices → Link with phone number** → enter the 8-character code.
 
-| Country | Example |
-| ------- | ------- |
-| Indonesia | `628123456789` |
-| Spain | `34612345678` |
-| United States | `14155552671` |
-
-**Example response** `201`:
-
-```json
-{
-  "pairingCode": "ABCD1234",
-  "status": "qr_ready"
-}
-```
-
-**On the phone:**
-
-1. WhatsApp → **Settings → Linked devices**  
-2. **Link with phone number**  
-3. Enter the 8-character `pairingCode`  
-
-See also: [Session Phone-Number Pairing](./session-phone-number-pairing.md).
+More detail: [Session Phone-Number Pairing](./session-phone-number-pairing.md).
 
 ---
 
 ## 4. Wait until status is `ready`
-
-Poll every 1–2 seconds:
 
 ```bash
 while true; do
@@ -244,22 +152,7 @@ while true; do
 done
 ```
 
-**Ready session example:**
-
-```json
-{
-  "id": "8f3c2b1a-9d4e-4c7a-8b2f-1e6d5a4c3b2a",
-  "name": "my-bot",
-  "status": "ready",
-  "phone": "6281234567890",
-  "pushName": "My Bot",
-  "connectedAt": "2026-06-25T08:14:02.000Z",
-  "lastActive": "2026-06-25T09:01:55.000Z",
-  "lastError": null
-}
-```
-
-You can now send messages, for example:
+Then you can send messages, for example:
 
 ```bash
 curl -X POST "$BASE_URL/api/sessions/$SESSION_ID/messages/send-text" \
@@ -378,24 +271,6 @@ curl -s "$BASE_URL/api/sessions/$SESSION_ID" -H "X-API-Key: $API_KEY" | jq .
 
 ---
 
-## Useful related endpoints
-
-| Method | Path | Purpose |
-| ------ | ---- | ------- |
-| `GET` | `/api/sessions` | List sessions |
-| `GET` | `/api/sessions/:id` | Get status / `lastError` |
-| `GET` | `/api/sessions/:id/qr` | QR PNG data URL |
-| `POST` | `/api/sessions/:id/start` | Start engine |
-| `POST` | `/api/sessions/:id/stop` | Stop → `disconnected` |
-| `POST` | `/api/sessions/:id/pairing-code` | 8-char link code |
-| `POST` | `/api/sessions/:id/force-kill` | Kill a stuck engine |
-| `DELETE` | `/api/sessions/:id` | Delete session |
-
-Interactive docs: `$BASE_URL/api/docs`  
-Full reference: [API Specification](../06-api-specification.md)
-
----
-
 ## Troubleshooting
 
 | Symptom | What to check |
@@ -409,3 +284,5 @@ Full reference: [API Specification](../06-api-specification.md)
 | Blank dashboard over HTTP | Use HTTPS behind a reverse proxy (CSP upgrades insecure requests). |
 
 > Use a **dedicated** WhatsApp number for automation — never your primary personal number. OpenWA is an unofficial gateway; bans are always possible.
+
+**Reference:** [API Specification](../06-api-specification.md) · Swagger `$BASE_URL/api/docs` · [Phone-number pairing](./session-phone-number-pairing.md)
