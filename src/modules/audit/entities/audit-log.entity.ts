@@ -9,6 +9,13 @@ export enum AuditAction {
   API_KEY_DELETED = 'api_key_deleted',
   API_KEY_AUTH_FAILED = 'api_key_auth_failed',
 
+  // Rate-limit enforcement (sampled: at most one row per subject+kind per minute — see
+  // EventsGateway — so enforcing a limit never becomes an audit-write flood of its own).
+  RATE_LIMIT_EXCEEDED = 'rate_limit_exceeded',
+
+  // Queue dashboard (Bull Board) events
+  QUEUE_BOARD_MUTATED = 'queue_board_mutated',
+
   // Session events
   SESSION_CREATED = 'session_created',
   SESSION_STARTED = 'session_started',
@@ -34,6 +41,16 @@ export enum AuditAction {
   INTEGRATION_INSTANCE_UPDATED = 'integration_instance_updated',
   INTEGRATION_INSTANCE_SECRET_REGENERATED = 'integration_instance_secret_regenerated',
   INTEGRATION_INSTANCE_DELETED = 'integration_instance_deleted',
+  INTEGRATION_INSTANCE_REDRIVEN = 'integration_instance_redriven',
+
+  // Infrastructure events (ADMIN-only operations on the infra module: credential-bearing config
+  // mutation, server restart / Docker orchestration, and full-DB / storage export+import).
+  INFRA_CONFIG_SAVED = 'infra_config_saved',
+  INFRA_RESTART_REQUESTED = 'infra_restart_requested',
+  INFRA_DATA_EXPORTED = 'infra_data_exported',
+  INFRA_DATA_IMPORTED = 'infra_data_imported',
+  INFRA_STORAGE_EXPORTED = 'infra_storage_exported',
+  INFRA_STORAGE_IMPORTED = 'infra_storage_imported',
 }
 
 export enum AuditSeverity {

@@ -10,6 +10,7 @@ type ChatSummary struct {
 	UnreadCount int     `json:"unreadCount"`
 	LastMessage string  `json:"lastMessage,omitempty"`
 	Timestamp   any     `json:"timestamp,omitempty"`
+	Kind        string  `json:"kind"`
 }
 
 // MarkChatRequest marks a chat read/unread.

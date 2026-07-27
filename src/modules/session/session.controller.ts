@@ -10,6 +10,7 @@ import {
   SendChatStateDto,
   RequestPairingCodeDto,
   PairingCodeResponseDto,
+  ChatSummaryDto,
 } from './dto';
 import { Session } from './entities/session.entity';
 import { ChatSummary } from '../../engine/interfaces/whatsapp-engine.interface';
@@ -42,13 +43,13 @@ export class SessionController {
     type: SessionResponseDto,
   })
   @ApiResponse({ status: 409, description: 'Session name already exists' })
-  async create(@Body() dto: CreateSessionDto): Promise<Session> {
+  async create(@Body() dto: CreateSessionDto): Promise<SessionResponseDto> {
     const session = await this.sessionService.create(dto);
     await this.auditService.logInfo(AuditAction.SESSION_CREATED, {
       sessionId: session.id,
       sessionName: session.name,
     });
-    return session;
+    return this.transformSession(session);
   }
 
   @Get()
@@ -228,7 +229,7 @@ export class SessionController {
   @Get(':id/chats')
   @ApiOperation({ summary: 'Get active chats for a session' })
   @ApiParam({ name: 'id', description: 'Session ID' })
-  @ApiResponse({ status: 200, description: 'List of active chats (most recent first)' })
+  @ApiResponse({ status: 200, description: 'List of active chats (most recent first)', type: [ChatSummaryDto] })
   @ApiResponse({ status: 400, description: 'Session not ready' })
   @ApiResponse({ status: 404, description: 'Session not found' })
   @ApiQuery({ name: 'limit', required: false, description: 'Max chats to return (1–1000, default 1000)' })

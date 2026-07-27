@@ -75,6 +75,22 @@ describe('StorageService (local) path traversal protection', () => {
     await expect(service.getFile('../secret.txt')).rejects.toThrow();
   });
 
+  it('deletes a file within the storage root', async () => {
+    await service.putFile('sub/gone.txt', Buffer.from('bye'));
+    await service.deleteFile('sub/gone.txt');
+    expect(fs.existsSync(path.join(localPath, 'sub/gone.txt'))).toBe(false);
+  });
+
+  it('deleting an already-missing file resolves without throwing', async () => {
+    await expect(service.deleteFile('never-existed.txt')).resolves.toBeUndefined();
+  });
+
+  it('rejects deleting a file outside the storage root', async () => {
+    fs.writeFileSync(path.join(baseDir, 'secret.txt'), 'topsecret');
+    await expect(service.deleteFile('../secret.txt')).rejects.toThrow();
+    expect(fs.existsSync(path.join(baseDir, 'secret.txt'))).toBe(true);
+  });
+
   it('imports safe entries but refuses tar entries that escape the storage root', async () => {
     const gz = await makeTarGz([
       { name: 'safe.txt', data: 'good' },
@@ -207,6 +223,35 @@ describe('StorageService import resource caps (decompression-bomb defense)', () 
     const gz = await makeTarGz([{ name: 'ok.txt', data: 'fine' }]);
     const count = await service.importFromStream(Readable.from(gz));
     expect(count).toBe(1);
+  });
+});
+
+describe('StorageService import stream error handling (request fails, process survives)', () => {
+  let baseDir: string;
+  let service: StorageService;
+
+  beforeEach(() => {
+    ({ service, baseDir } = makeLocalService());
+  });
+
+  afterEach(() => {
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("rejects on a non-gzip input instead of crashing on gunzip's unhandled error event", async () => {
+    // zlib emits 'error' on the gunzip stream for a corrupt/non-gzip payload; pipe() does not forward
+    // it, so without a listener on gunzip this would take down the whole process.
+    const notGzip = Readable.from([Buffer.from('this is definitely not a gzip stream')]);
+    await expect(service.importFromStream(notGzip)).rejects.toThrow();
+  });
+
+  it('rejects when the input stream itself errors mid-read', async () => {
+    const failing = new Readable({
+      read() {
+        this.destroy(new Error('read boom'));
+      },
+    });
+    await expect(service.importFromStream(failing)).rejects.toThrow(/read boom/);
   });
 });
 
