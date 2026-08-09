@@ -282,13 +282,19 @@ describe('PluginsService — download integrity (optional #sha256 pinning)', () 
     expect(loader.getPlugin('svc-plg')).toBeDefined();
   });
 
-  it('also accepts the digest as a ?sha256= query parameter', async () => {
+  it('ignores a ?sha256= query parameter — only the #sha256= fragment pins the digest', async () => {
     const buf = pkg();
     serveOnce(buf);
+    const wrong = '0'.repeat(64);
 
-    const dto = await service.installFromUrl(`https://plugins.example/svc-plg.zip?sha256=${sha256(buf)}`);
+    // The query digest does not match the bytes, yet the install still succeeds on the fragment's
+    // verdict: a query param is never an integrity marker (it belongs to the download host).
+    const dto = await service.installFromUrl(
+      `https://plugins.example/svc-plg.zip?sha256=${wrong}#sha256=${sha256(buf)}`,
+    );
 
     expect(dto.id).toBe('svc-plg');
+    expect(loader.getPlugin('svc-plg')).toBeDefined();
   });
 
   it('fails closed when the pinned digest does not match (package substituted in transit)', async () => {
@@ -483,20 +489,17 @@ describe('PluginsService — per-session config', () => {
     expect(plugin?.sessionConfig?.['sess-A']).toEqual({ apiKey: 'A-secret', lang: 'he' });
   });
 
-  // A session-restricted API key must not activate the plugin for sessions outside its allowedSessions
-  // scope (the target sessions are in the request body the guard never inspects).
-  it('rejects activating for a session outside a restricted key scope', () => {
-    expect(() => service.updateSessions('sess-cfg', ['sess-B'], ['sess-A'])).toThrow(/not authorized/i);
-    expect(() => service.updateSessions('sess-cfg', ['*'], ['sess-A'])).toThrow(/not authorized/i);
-  });
-
-  it('allows a restricted key to activate only within its scope', () => {
-    expect(service.updateSessions('sess-cfg', ['sess-A'], ['sess-A']).activeSessions).toEqual(['sess-A']);
+  // The route is fenced with @RequireUnscopedKey, so the service signature no longer carries a
+  // scope argument. updateSessions is a FULL replacement: each write overwrites the entire active
+  // set, so the exact array survives each call (setPluginSessions assigns plugin.activeSessions).
+  it('fully replaces the active set on each write (single, wildcard, then cleared)', () => {
+    expect(service.updateSessions('sess-cfg', ['sess-A']).activeSessions).toEqual(['sess-A']);
+    expect(service.updateSessions('sess-cfg', ['*']).activeSessions).toEqual(['*']);
+    expect(service.updateSessions('sess-cfg', []).activeSessions).toEqual([]);
   });
 
   it('lets an unrestricted key activate for all sessions', () => {
-    expect(service.updateSessions('sess-cfg', ['*'], undefined).activeSessions).toEqual(['*']);
-    expect(service.updateSessions('sess-cfg', ['*'], []).activeSessions).toEqual(['*']);
+    expect(service.updateSessions('sess-cfg', ['*']).activeSessions).toEqual(['*']);
   });
 
   it('clears the override when an empty slice is written', () => {
@@ -590,5 +593,54 @@ describe('isIngressCapable', () => {
   it('is false without the webhook:ingress permission', () => {
     expect(isIngressCapable({ ingress: [{ route: 'events' }], permissions: [] })).toBe(false);
     expect(isIngressCapable({ ingress: [{ route: 'events' }] })).toBe(false);
+  });
+});
+
+describe('PluginsService — disable when the plugin is not loaded', () => {
+  let tmpDir: string;
+  let pluginsDir: string;
+  let config: ConfigService;
+
+  const build = () => {
+    const storage = new PluginStorageService(config);
+    const loader = new PluginLoaderService(config, new HookManager(), storage, {} as unknown as ModuleRef);
+    return { storage, loader, service: new PluginsService(loader, config) };
+  };
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'owa-disable-'));
+    pluginsDir = path.join(tmpDir, 'plugins');
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    config = {
+      get: (k: string) => (k === 'plugins.dir' ? pluginsDir : k === 'dataDir' ? tmpDir : undefined),
+    } as unknown as ConfigService;
+  });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  // Regression: a plugin whose package directory is gone (an interrupted update, or a directory that
+  // was never on the data volume) still has a registry entry carrying enabledByOperator — the standing
+  // instruction to enable it on every boot. disable() threw NotFound because the loader had nothing to
+  // tear down, so the operator could not withdraw that decision by any route: reinstalling the code
+  // brought the plugin straight back up.
+  it('clears the boot decision for an installed plugin whose code is missing', async () => {
+    const first = build();
+    first.service.install({ buffer: pkg() });
+    first.loader.setOperatorEnabled('svc-plg', true);
+
+    // The code disappears; a restart re-reads the registry but loads nothing.
+    fs.rmSync(path.join(pluginsDir, 'svc-plg'), { recursive: true, force: true });
+    const restarted = build();
+    expect(restarted.loader.getPlugin('svc-plg')).toBeUndefined();
+    expect(restarted.storage.getPluginEntry('svc-plg')?.enabledByOperator).toBe(true);
+
+    const res = await restarted.service.disable('svc-plg');
+
+    expect(res.success).toBe(true);
+    expect(restarted.storage.getPluginEntry('svc-plg')?.enabledByOperator).toBe(false);
+  });
+
+  it('still throws NotFound for an id with no registry entry at all', async () => {
+    const { service } = build();
+    await expect(service.disable('never-installed')).rejects.toThrow(/not found/i);
   });
 });

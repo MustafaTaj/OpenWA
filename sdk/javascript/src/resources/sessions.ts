@@ -12,16 +12,44 @@ import type {
   PairingCodeResponse,
   QrCodeResponse,
   RequestPairingCodeRequest,
+  SessionConfig,
   SessionResponse,
+  UpdateSessionConfigRequest,
   SessionStatsOverview,
 } from '../types.js';
+
+/** Pagination for {@link SessionsResource.list}. The server applies its own default when omitted. */
+export interface ListSessionsQuery {
+  limit?: number;
+  offset?: number;
+}
 
 export class SessionsResource {
   constructor(private readonly client: OpenWAClient) {}
 
   /** List all sessions (scoped to the API key's `allowedSessions`). */
-  list(): Promise<SessionResponse[]> {
-    return this.client.request<SessionResponse[]>({ method: 'GET', path: '/api/sessions' });
+  list(query?: ListSessionsQuery): Promise<SessionResponse[]> {
+    return this.client.request<SessionResponse[]>({ method: 'GET', path: '/api/sessions', query });
+  }
+
+  /** Read a session's effective configuration. */
+  getConfig(id: string): Promise<SessionConfig> {
+    return this.client.request<SessionConfig>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(id)}/config`,
+    });
+  }
+
+  /**
+   * Update a running session's configuration. Takes effect without re-linking the account — all three
+   * fields were fixed at creation before this route existed.
+   */
+  updateConfig(id: string, body: UpdateSessionConfigRequest): Promise<SessionConfig> {
+    return this.client.request<SessionConfig>({
+      method: 'PATCH',
+      path: `/api/sessions/${encodeSegment(id)}/config`,
+      body,
+    });
   }
 
   /** Get a single session by id. */
@@ -47,6 +75,22 @@ export class SessionsResource {
   /** Stop a session and disconnect gracefully. */
   stop(id: string): Promise<SessionResponse> {
     return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/stop` });
+  }
+
+  /**
+   * Attempt an engine-native unlink of this device, then stop the session. A `200` means the
+   * unlink operation AND the required local credential cleanup completed — it is not an
+   * independent observation that the handset UI no longer shows the linked device. Because a
+   * completed unlink wipes the stored credentials, a later `start` requires a fresh QR scan or
+   * pairing code. Requires a running session. Rejects with HTTP `502` and
+   * `code: 'SESSION_LOGOUT_INCOMPLETE'` when the session was stopped locally but the logout
+   * operation did not complete (no send, no acknowledgement, timeout/transport error, or local
+   * cleanup failure); `phone` is cleared and no success audit is written. Start the session again
+   * and retry the logout; do not assume the retry reconnects automatically or lands in a
+   * guaranteed QR state.
+   */
+  logout(id: string): Promise<SessionResponse> {
+    return this.client.request<SessionResponse>({ method: 'POST', path: `/api/sessions/${encodeSegment(id)}/logout` });
   }
 
   /** Force-kill a stuck session (SIGKILL + teardown). */

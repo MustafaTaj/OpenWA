@@ -102,10 +102,16 @@ const availableEventNames = [
   'session.authenticated',
   'session.disconnected',
   'session.reconnect_loop',
+  'session.restriction',
+  'presence.update',
   'group.join',
   'group.leave',
   'group.update',
+  'group.join_request',
   'call.received',
+  'call.accepted',
+  'call.rejected',
+  'call.missed',
   'status.received',
   '*',
 ] as const;
@@ -135,7 +141,7 @@ export function Webhooks() {
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Single source for the contact/group autocomplete in whichever modal is open.
-  const activeSessionId = showEditModal ? editWebhook?.sessionId ?? '' : newWebhook.sessionId;
+  const activeSessionId = showEditModal ? (editWebhook?.sessionId ?? '') : newWebhook.sessionId;
   const { data: chats = [] } = useSessionChatsQuery(activeSessionId, showCreateModal || showEditModal);
 
   const eventDescription = (name: string) => {
@@ -484,7 +490,8 @@ export function Webhooks() {
           ) : (
             <div className="webhooks-card-list">
               {webhooks.map(webhook => {
-                const sessionName = sessions.find(s => s.id === webhook.sessionId)?.name || webhook.sessionId.substring(0, 12);
+                const sessionName =
+                  sessions.find(s => s.id === webhook.sessionId)?.name || webhook.sessionId.substring(0, 12);
                 return (
                   <div key={webhook.id} className="webhook-card">
                     <div className="webhook-card-header">
@@ -499,11 +506,19 @@ export function Webhooks() {
                           onClick={() => handleTest(webhook.sessionId, webhook.id)}
                           disabled={testingId === webhook.id}
                         >
-                          {testingId === webhook.id ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                          {testingId === webhook.id ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <Play size={16} />
+                          )}
                         </button>
                         {canWrite && (
                           <>
-                            <button className="icon-btn" title={t('webhooks.actions.edit')} onClick={() => openEdit(webhook)}>
+                            <button
+                              className="icon-btn"
+                              title={t('webhooks.actions.edit')}
+                              onClick={() => openEdit(webhook)}
+                            >
                               <Edit size={16} />
                             </button>
                             <button

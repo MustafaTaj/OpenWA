@@ -5,7 +5,12 @@ import { PluginLoaderService } from '../../core/plugins/plugin-loader.service';
 import { AuditAction } from '../audit/entities/audit-log.entity';
 import { AuditService } from '../audit/audit.service';
 import { ScopeBindingService } from './scope-binding.service';
+import { SessionService } from '../session/session.service';
 import { ApiKey } from '../auth/entities/api-key.entity';
+
+// ScopeBindingService reads session rows only for its boot-time "this scope matches no session"
+// warning; provisioning never reaches it, so these tests hand it a resolving stub.
+const sessions = { findOne: jest.fn().mockResolvedValue({ id: 'sess-1' }) } as unknown as SessionService;
 
 // The provisioning bridge is what makes a minted instance's config reach the ingress worker: on
 // create/patch it mirrors the instance config into the plugin's per-session config and activates the
@@ -50,7 +55,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.create('chatwoot-adapter', {
@@ -86,7 +91,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { enabled: false });
@@ -114,7 +119,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { enabled: false });
@@ -144,7 +149,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { enabled: false });
@@ -182,7 +187,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { sessionScope: 'sess-2' });
@@ -213,7 +218,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { enabled: false });
@@ -250,7 +255,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.remove('chatwoot-adapter', 'acct1');
@@ -281,7 +286,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.remove('chatwoot-adapter', 'acct1');
@@ -323,7 +328,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { sessionScope: 'sess-2' });
@@ -354,7 +359,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.patch('chatwoot-adapter', 'acct1', { enabled: false });
@@ -393,7 +398,7 @@ describe('IntegrationInstanceController provisioning bridge', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
 
     await controller.create('chatwoot-adapter', {
@@ -410,7 +415,8 @@ describe('IntegrationInstanceController provisioning bridge', () => {
 
 // sessionScope travels in the request body, which the ApiKeyGuard's route-param fence never sees —
 // so the controller itself confines a session-scoped key to instances bound inside its
-// allowedSessions (the same pattern plugins.controller uses for updateSessions).
+// allowedSessions (the body-scoping pattern; the plugin updateSessions route is NOT scoped this way
+// — it is a full active-set replacement and is fenced with @RequireUnscopedKey).
 describe('IntegrationInstanceController session-scope fence', () => {
   const scopedKey = { allowedSessions: ['sess-1'] } as ApiKey;
   const unrestrictedKey = { allowedSessions: null } as unknown as ApiKey;
@@ -431,7 +437,7 @@ describe('IntegrationInstanceController session-scope fence', () => {
       svc,
       loader,
       audit,
-      new ScopeBindingService(svc, loader, audit),
+      new ScopeBindingService(svc, loader, audit, sessions),
     );
     return { controller, svc };
   }
@@ -621,7 +627,7 @@ describe('IntegrationInstanceController reveal masking', () => {
       instances,
       loader,
       audit,
-      new ScopeBindingService(instances, loader, audit),
+      new ScopeBindingService(instances, loader, audit, sessions),
     );
     return { controller };
   }
@@ -711,7 +717,7 @@ describe('IntegrationInstanceController update audit', () => {
       instances,
       loader,
       audit as unknown as AuditService,
-      new ScopeBindingService(instances, loader, audit as unknown as AuditService),
+      new ScopeBindingService(instances, loader, audit as unknown as AuditService, sessions),
     );
     return { controller, audit, instances };
   }

@@ -10,9 +10,10 @@ import helmet from 'helmet';
 import { AppModule, DASHBOARD_DIST, dashboardServingEnabled, dashboardBuildPresent } from './app.module';
 import { ShutdownService } from './common/services/shutdown.service';
 import { LoggerService, LogLevel, createLogger } from './common/services/logger.service';
-import { createSwaggerConfig, exemptPublicOperations } from './config/swagger.config';
-import { registerUncaughtExceptionMonitor } from './config/process-error-monitor';
+import { createSwaggerConfig, dropUnexpressibleOperations, exemptPublicOperations } from './config/swagger.config';
+import { registerUncaughtExceptionMonitor, registerUnhandledRejectionHandler } from './config/process-error-monitor';
 import { runBootstrapOrExit } from './config/bootstrap-fatal';
+import { resolveStorageRoot } from './config/storage-root';
 import { applyHttpTimeouts, HttpTimeoutConfig, HttpTimeoutSink } from './config/http-timeouts';
 import { createInflightBodyBudget, resolveInflightBodyBudgetBytes } from './config/inflight-body-budget';
 import { applyGlobalValidation } from './config/app-validation';
@@ -34,6 +35,7 @@ import { Request, Response, NextFunction, json, urlencoded } from 'express';
 import { randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { extname, join } from 'path';
+import { RedisIoAdapter } from './modules/events/redis-io.adapter';
 
 // The created app, exposed at module scope so the fatal handler below can run a best-effort teardown
 // (engine sessions, Redis/pg) when bootstrap fails AFTER NestFactory.create succeeded — notably a
@@ -48,12 +50,9 @@ async function bootstrap() {
   }
 
   // Backstop for promise rejections that escaped a local handler (e.g. a fire-and-forget engine-event
-  // dispatch). Node terminates the process on an unhandled rejection by default; for a long-running
-  // self-hosted gateway we'd rather log it and stay up than let one stray rejection kill all sessions.
+  // dispatch), including the expected engine-teardown case it downgrades to a warning (see the helper).
   const bootstrapLogger = createLogger('Bootstrap');
-  process.on('unhandledRejection', (reason: unknown) => {
-    bootstrapLogger.error('Unhandled promise rejection', reason instanceof Error ? reason.stack : String(reason));
-  });
+  registerUnhandledRejectionHandler(bootstrapLogger);
 
   // A synchronous throw from a non-promise context (e.g. a sync timer callback) is fatal — Node prints a
   // raw stack to stderr, bypassing the structured log pipeline, and exits(1). Route the stack through the
@@ -88,9 +87,23 @@ async function bootstrap() {
     );
   }
 
+  // Fail fast on a media storage root the app cannot write to, BEFORE Nest builds the module graph:
+  // StorageService only checks that the root EXISTS, so a root owned by another user passes boot and
+  // fails later on the first media write instead (#1065). Runs ahead of NestFactory.create so
+  // configuration.ts reads the resolved value.
+  process.env.STORAGE_LOCAL_PATH = resolveStorageRoot({
+    configured: process.env.STORAGE_LOCAL_PATH,
+    logger: bootstrapLogger,
+  });
+
   // Disable Nest's default body parser so we can set an explicit size cap below.
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   appInstance = app;
+
+  // Cross-replica WebSocket fan-out: when Redis is enabled, broadcasts reach clients on every
+  // replica, not just this process. Set before the gateway's namespace is created so it inherits
+  // the adapter. Inert (plain in-memory adapter) without REDIS_ENABLED, so single-node pays nothing.
+  app.useWebSocketAdapter(new RedisIoAdapter(app));
 
   // Aggregate in-flight body budget (DoS hardening): once too many body bytes are being buffered
   // across ALL connections, new requests get 503 + Retry-After without their body being read.
@@ -111,9 +124,16 @@ async function bootstrap() {
   // The `verify` callback stashes the EXACT bytes json() received on req.rawBody, byte-identical to
   // what a provider signed, so the @Public ingress controller can HMAC-verify over the raw body
   // (JSON.stringify(req.body) is NOT byte-identical). Cheap for every route; non-ingress routes ignore it.
+  // `inflate: false` is a backstop, not the guard: the budget middleware above already refuses a
+  // compressed body with 415 before a byte is read. It sits here so a future reordering of these
+  // parsers relative to that middleware cannot silently reopen the gap — an inflated body is
+  // charged to the budget at its compressed size and bounded by nothing. Every other parser in the
+  // process must carry the same flag for that argument to hold; the MCP route-level fallback
+  // (src/modules/mcp/mcp.server.ts) does.
   app.use(
     json({
       limit: bodyLimit,
+      inflate: false,
       verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
         req.rawBody = buf;
       },
@@ -123,6 +143,7 @@ async function bootstrap() {
     urlencoded({
       extended: true,
       limit: bodyLimit,
+      inflate: false,
       // Form-encoded webhook providers also sign the exact wire bytes. Use the same capture contract
       // as json(); other content types remain unsupported rather than installing a global catch-all.
       verify: (req: Request & { rawBody?: Buffer }, _res, buf) => {
@@ -302,6 +323,10 @@ async function bootstrap() {
   if (swaggerEnabled) {
     const config = createSwaggerConfig();
     const document = SwaggerModule.createDocument(app, config);
+    // Same two passes, in the same order, as scripts/export-openapi.ts. The document is produced in
+    // TWO places — here for the live /api/docs and there for the committed snapshot — and fixing only
+    // the snapshot leaves a running gateway serving a document that fails schema validation.
+    dropUnexpressibleOperations(document);
     exemptPublicOperations(document);
     SwaggerModule.setup('api/docs', app, document);
   }

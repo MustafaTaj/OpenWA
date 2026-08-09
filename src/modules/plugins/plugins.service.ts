@@ -1,11 +1,4 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-  ConflictException,
-  ForbiddenException,
-  HttpException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException, HttpException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -158,7 +151,18 @@ export class PluginsService {
     const plugin = this.pluginLoader.getPlugin(id);
 
     if (!plugin) {
-      throw new NotFoundException(`Plugin ${id} not found`);
+      // Not loaded, but the registry may still hold its entry — and with it `enabledByOperator`, the
+      // standing instruction to enable it on every boot. A plugin whose code went missing (an
+      // interrupted update, a package directory outside the data volume) is exactly that case: there is
+      // no runtime to tear down, so `disablePlugin` can never run, and until now the operator had no way
+      // to withdraw the decision at all. `disable` expresses intent rather than performing a runtime
+      // operation, so honour it against the registry; reinstalling the code must not silently resurrect
+      // a plugin the operator switched off. A 404 now means only what it should: an id nobody knows.
+      if (!this.pluginLoader.getRegistryEntry(id)) {
+        throw new NotFoundException(`Plugin ${id} not found`);
+      }
+      this.pluginLoader.setOperatorEnabled(id, false);
+      return { success: true, message: `Plugin ${id} is not loaded; it will not be enabled on boot` };
     }
 
     if (plugin.status !== PluginStatus.ENABLED) {
@@ -180,20 +184,14 @@ export class PluginsService {
     }
   }
 
-  updateSessions(id: string, sessions: string[], allowedSessions?: string[] | null): PluginDto {
+  updateSessions(id: string, sessions: string[]): PluginDto {
     const plugin = this.pluginLoader.getPlugin(id);
     if (!plugin) {
       throw new NotFoundException(`Plugin ${id} not found`);
     }
-    // A session-restricted key (non-empty allowedSessions) may only activate the plugin for sessions
-    // in its own scope — never '*' (all) or another tenant's session. An unrestricted key (null/empty)
-    // is the normal dashboard/admin path and may activate for any session, including '*'.
-    if (allowedSessions && allowedSessions.length > 0) {
-      const outOfScope = sessions.filter(s => s === '*' || !allowedSessions.includes(s));
-      if (outOfScope.length > 0) {
-        throw new ForbiddenException(`API key not authorized for session(s): ${outOfScope.join(', ')}`);
-      }
-    }
+    // Full-replacement PUT: setPluginSessions overwrites the ENTIRE activeSessions array. The route
+    // is fenced with @RequireUnscopedKey, so only an unrestricted key can reach this — a scoped key
+    // must never be allowed to delete another tenant's activation by sending [] or its own session.
     try {
       this.pluginLoader.setPluginSessions(id, sessions);
     } catch (error) {
@@ -342,11 +340,12 @@ export class PluginsService {
 
   /**
    * Install a plugin from an HTTPS URL: download the .zip through the SSRF guard (host validated,
-   * connection pinned, redirects refused, size-capped), then run the exact same validate-write-load
+   * connection pinned, redirects followed with every hop re-validated through the guard and the
+   * chain capped at 5 hops, size-capped), then run the exact same validate-write-load
    * pipeline as an uploaded package. The downloaded buffer is treated as untrusted, identical to an
-   * upload. When the URL pins a digest (`#sha256=<hex>` fragment or `?sha256=` query — see
-   * plugin-download.ts), the bytes MUST match it: a mismatch means the package was substituted in
-   * transit and the install fails closed.
+   * upload. When the URL pins a digest (`#sha256=<hex>` fragment — the only honored marker; query
+   * params are deliberately ignored, see plugin-download.ts), the bytes MUST match it: a mismatch
+   * means the package was substituted in transit and the install fails closed.
    */
   async installFromUrl(url: string): Promise<PluginDto> {
     const maxBytes = this.configService.get<number>('plugins.downloadMaxBytes') ?? 5 * 1024 * 1024;

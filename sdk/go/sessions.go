@@ -13,6 +13,27 @@ func (s *SessionsService) List(ctx context.Context, query *ListSessionsQuery) ([
 	return out, err
 }
 
+// GetConfig reads a session's effective configuration.
+func (s *SessionsService) GetConfig(ctx context.Context, sessionID string) (*SessionConfig, error) {
+	var out SessionConfig
+	err := s.client.do(ctx, "GET", "/api/sessions/"+pathEscape(sessionID)+"/config", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateConfig changes a RUNNING session's configuration. It takes effect without re-linking the
+// account — all three fields were fixed at creation before this route existed.
+func (s *SessionsService) UpdateConfig(ctx context.Context, sessionID string, body UpdateSessionConfigRequest) (*SessionConfig, error) {
+	var out SessionConfig
+	err := s.client.do(ctx, "PATCH", "/api/sessions/"+pathEscape(sessionID)+"/config", nil, body, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Get returns a single session.
 func (s *SessionsService) Get(ctx context.Context, sessionID string) (*SessionResponse, error) {
 	var out SessionResponse
@@ -52,6 +73,24 @@ func (s *SessionsService) Start(ctx context.Context, sessionID string) (*Session
 func (s *SessionsService) Stop(ctx context.Context, sessionID string) (*SessionResponse, error) {
 	var out SessionResponse
 	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/stop", nil, nil, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Logout attempts an engine-native unlink of this device, then tears the session down. A 200
+// means the unlink operation AND the required local credential cleanup completed — it is not an
+// independent observation that the handset UI no longer shows the linked device. Because a
+// completed unlink wipes the stored credentials, a later Start requires a fresh QR scan or
+// pairing code. Requires a running session. Returns an HTTP 502 error with
+// code 'SESSION_LOGOUT_INCOMPLETE' when the session was stopped locally but the logout operation
+// did not complete (no send, no acknowledgement, timeout/transport error, or local cleanup
+// failure); phone is cleared and no success audit is written. Start the session again and retry
+// the logout; do not assume the retry reconnects automatically or lands in a guaranteed QR state.
+func (s *SessionsService) Logout(ctx context.Context, sessionID string) (*SessionResponse, error) {
+	var out SessionResponse
+	err := s.client.do(ctx, "POST", "/api/sessions/"+pathEscape(sessionID)+"/logout", nil, nil, &out)
 	if err != nil {
 		return nil, err
 	}

@@ -21,12 +21,36 @@ export type ChatKind = 'individual' | 'group' | 'channel' | 'status' | 'broadcas
 
 /** Session lifecycle status. */
 export type SessionStatus =
-  'created' | 'initializing' | 'qr_ready' | 'authenticating' | 'ready' | 'disconnected' | 'failed';
+  'created' | 'initializing' | 'qr_ready' | 'authenticating' | 'ready' | 'disconnected' | 'action_required' | 'failed';
 
 /** Minimal success envelope returned by some state-changing endpoints. */
 export interface SuccessResult {
   success: boolean;
   message?: string;
+}
+
+/** One entry per requested participant, in the order they were requested. */
+export interface ParticipantResult {
+  /** Neutral participant id the outcome belongs to. */
+  id: string;
+  /**
+   * True only when the engine confirmed the change for this participant. Engines that confirm the
+   * batch rather than each member report one success entry per requested id, so `true` does not
+   * always mean the engine spoke about that participant individually.
+   */
+  success: boolean;
+  /** The engine's own status code, when it gave one. */
+  status?: number;
+  /** Engine-reported reason, when it gave one. */
+  message?: string;
+}
+
+/**
+ * The group membership writes. A partial refusal does NOT fail the batch — the request answers 200
+ * and reports the per-participant outcome here, so `success` alone hides a member that was rejected.
+ */
+export interface ParticipantsResult extends SuccessResult {
+  results: ParticipantResult[];
 }
 
 // ── Session ───────────────────────────────────────────────────────
@@ -41,8 +65,118 @@ export interface SessionResponse {
   lastActive?: string | null;
   createdAt: string;
   updatedAt: string;
-  /** Only present when `status === 'failed'`. */
+  /** Only present when `status === 'failed'` (terminal failure) or `status === 'action_required'` (operator must intervene). */
   lastError?: string | null;
+  /**
+   * A limit WhatsApp itself has placed on the account, or `null` when there is none. Distinct from
+   * `lastError`, which describes a fault on the gateway's side. Absent from a gateway that predates
+   * the field.
+   */
+  restriction?: AccountRestriction | null;
+  /**
+   * Whether the gateway holds a live engine for this session right now — the precondition `stop`,
+   * `logout` and `force-kill` require and `start` refuses. Not derivable from `status`:
+   * `disconnected` covers both a session mid automatic-reconnect (engine present) and one stopped
+   * with no engine. Absent from a gateway that predates the field.
+   */
+  engineLoaded?: boolean;
+}
+
+/**
+ * A restriction WhatsApp has in force on a session's account.
+ *
+ * `reachout_timelock` leaves the session connected and existing chats working — only starting new
+ * conversations is blocked — whereas `tos_block` and `proxy_block` refuse the connection itself and
+ * therefore cannot coexist with a `ready` status.
+ */
+export interface AccountRestriction {
+  kind: 'reachout_timelock' | 'tos_block' | 'proxy_block';
+  /** The engine's own token for the cause, verbatim (`TOS_BLOCK`, `BIZ_QUALITY`, …). */
+  code: string;
+  /** ISO timestamp when enforcement ends, when WhatsApp states one. */
+  expiresAt?: string | null;
+}
+
+/** One participant's presence within a chat. */
+export interface ParticipantPresence {
+  id: string;
+  /** `composing`/`recording` mean actively typing or recording; `paused` means they stopped. */
+  state: 'available' | 'unavailable' | 'composing' | 'recording' | 'paused';
+  /** Unix SECONDS. Absent whenever the contact's privacy settings hide last-seen — the common case. */
+  lastSeen?: number;
+}
+
+/** The last presence reported for a chat since it was subscribed. */
+export interface ChatPresence {
+  chatId: string;
+  participants: ParticipantPresence[];
+  /** Online member count, groups only. */
+  groupOnlineCount?: number;
+  /** When the gateway received the report — NOT a WhatsApp timestamp. */
+  observedAt: string;
+}
+
+/**
+ * A label create-or-update body. The id travels in the path, because WhatsApp keys the write on it.
+ */
+export interface UpsertLabelRequest {
+  /** Leave out to keep the current name. */
+  name?: string;
+  /**
+   * WhatsApp's colour INDEX (0-19), NOT a hex value — it does not round-trip with the `hexColor`
+   * labels are read back with, because neither engine exposes the mapping. Leave out to keep the
+   * current colour.
+   */
+  color?: number;
+}
+
+/** Body for creating a channel. */
+export interface CreateChannelRequest {
+  name: string;
+  description?: string;
+}
+
+/** Body for muting or unmuting a channel. */
+export interface MuteChannelRequest {
+  /** True mutes, false unmutes. The subscription is unaffected either way. */
+  mute: boolean;
+}
+
+/**
+ * What an invite code discloses about a group before joining. Not `GroupInfo`: a non-member has no
+ * participant list, only a count, and only when WhatsApp discloses one.
+ */
+export interface GroupJoinInfo {
+  id: string;
+  name: string;
+  description?: string;
+  owner?: string;
+  /** Unix seconds. */
+  createdAt?: number;
+  participantCount?: number;
+}
+
+/**
+ * A session's effective runtime configuration.
+ *
+ * Only `maxReconnectAttempts` is nullable, and `null` there means UNLIMITED — not "unset". The
+ * server always reports a concrete `reconnectBaseDelay` and `autoRejectCalls`.
+ */
+export interface SessionConfig {
+  autoRejectCalls: boolean;
+  maxReconnectAttempts: number | null;
+  reconnectBaseDelay: number;
+}
+
+/**
+ * Partial update of a session's config. Applies to a session that is already running — no re-link and
+ * no QR scan. Send `null` for `maxReconnectAttempts` to restore unlimited retries, which no in-range
+ * number can express.
+ */
+export interface UpdateSessionConfigRequest {
+  autoRejectCalls?: boolean | null;
+  maxReconnectAttempts?: number | null;
+  reconnectBaseDelay?: number | null;
 }
 
 export interface CreateSessionRequest {
@@ -94,6 +228,18 @@ export interface SendTextRequest {
   text: string;
   /** WIDs to @mention (e.g. `["62811@c.us"]`). The text must also contain the `@<number>` token. */
   mentions?: string[];
+  /**
+   * Controls the URL preview. `false` suppresses it on both engines. Otherwise the engines differ:
+   * whatsapp-web.js builds one in-page by default, while on Baileys a preview is OPT-IN — it needs
+   * `true`, because generating one is a blocking outbound fetch per URL.
+   */
+  linkPreview?: boolean;
+  /**
+   * Attach a preview you supply yourself instead of one fetched from the URL. Nothing is fetched, so
+   * this works even for a URL the gateway cannot reach. **Baileys only** — whatsapp-web.js takes a
+   * boolean and answers 501. Cannot be combined with `linkPreview: false`.
+   */
+  customLinkPreview?: { url: string; title: string; description?: string };
 }
 
 export interface SendMediaRequest {
@@ -162,6 +308,60 @@ export interface DeleteMessageRequest {
   messageId: string;
   /** Delete for everyone (default true). */
   forEveryone?: boolean;
+}
+
+/** Pin windows WhatsApp recognises, in seconds: 24h, 7d, 30d. */
+export type PinDurationSeconds = 86400 | 604800 | 2592000;
+
+export interface PinMessageRequest {
+  chatId: Jid;
+  messageId: string;
+  /** Defaults to 86400 (24h) server-side. */
+  durationSeconds?: PinDurationSeconds;
+}
+
+export interface SetGroupPictureRequest {
+  /** Provide exactly one of `url` or `base64` (base64 wins when both are present). */
+  url?: string;
+  base64?: string;
+  /** Required when using `base64`. Must be an image type. */
+  mimetype?: string;
+}
+
+export interface UpsertContactRequest {
+  /** The contact's first name. */
+  firstName: string;
+  /** Omit for a single-name contact. */
+  lastName?: string;
+}
+
+export interface ArchiveChatRequest {
+  chatId: Jid;
+  /** true to archive, false to unarchive. */
+  archive: boolean;
+}
+
+export interface VotePollRequest {
+  chatId: Jid;
+  /** The poll creation message to vote on. */
+  pollMessageId: string;
+  /**
+   * Option TEXTS to select, exactly as they appear on the poll — there are no option ids.
+   * Replaces the current selection; an empty array clears the vote.
+   */
+  options: string[];
+}
+
+export interface StarMessageRequest {
+  chatId: Jid;
+  messageId: string;
+  /** true to star, false to remove the star. */
+  star: boolean;
+}
+
+export interface UnpinMessageRequest {
+  chatId: Jid;
+  messageId: string;
 }
 
 export interface EditMessageRequest {
@@ -361,9 +561,15 @@ export interface ContactRecord {
   id: Jid;
   name?: string | null;
   number?: string | null;
-  pushname?: string | null;
-  isBusiness?: boolean;
+  /** The name the contact set on their own account. Both engines emit this as `pushName`. */
+  pushName?: string | null;
   isMyContact?: boolean;
+  /**
+   * Whether the account has blocked this contact. Reported best-effort: the Baileys adapter does not
+   * track blocklist state and always reports `false`.
+   */
+  isBlocked?: boolean;
+  profilePicUrl?: string | null;
 }
 
 export interface CheckNumberResponse {
@@ -454,6 +660,9 @@ export interface JoinGroupResponse {
   groupId: Jid;
 }
 
+/** Who may add participants to a group. */
+export type GroupMemberAddMode = 'all' | 'admins';
+
 /** Group settings as returned by `GET /sessions/:id/groups/:groupId/settings`. */
 export interface GroupSettingsResponse {
   /** Only admins can send messages (announce group). */
@@ -462,6 +671,8 @@ export interface GroupSettingsResponse {
   locked?: boolean;
   /** Disappearing-messages timer in seconds; 0 disables. Known values: 86400 (24h), 604800 (7d), 7776000 (90d). */
   ephemeralSeconds?: number;
+  /** Who may add participants: 'all' (any member) or 'admins' (admins only). */
+  memberAddMode?: GroupMemberAddMode;
 }
 
 /**
@@ -509,6 +720,11 @@ export type WebhookEvent =
   | 'session.authenticated'
   | 'session.disconnected'
   | 'session.reconnect_loop'
+  | 'session.restriction'
+  | 'presence.update'
+  | 'call.accepted'
+  | 'call.rejected'
+  | 'call.missed'
   | 'group.join'
   | 'group.leave'
   | 'group.update'
@@ -609,7 +825,7 @@ export interface StatusRecord {
     name?: string;
     pushName?: string;
   };
-  type: 'text' | 'image' | 'video';
+  type: 'text' | 'image' | 'video' | 'voice';
   /** Text body for a text status, caption for an image/video one. */
   caption?: string;
   mediaUrl?: string;
@@ -622,7 +838,7 @@ export interface StatusRecord {
 }
 
 /**
- * Result of a status POST (`send-text`/`send-image`/`send-video`).
+ * Result of a status POST (`send-text`/`send-image`/`send-video`/`send-voice`).
  * Mirrors the backend `StatusResult` exactly.
  */
 export interface StatusResult {
@@ -665,6 +881,20 @@ export interface SendVideoStatusRequest {
   /** Recipient JIDs. Required on the Baileys engine (absent/empty → 400); omit on whatsapp-web.js, which broadcasts instead. */
   recipients?: string[];
   caption?: string;
+}
+
+/**
+ * A voice status carries no caption — WhatsApp has nowhere to render one on a status voice note.
+ *
+ * `audio.mimetype` defaults to `audio/ogg; codecs=opus`, which is the only format WhatsApp plays as a
+ * status voice note. Neither engine transcodes, so produce those bytes with `media.convertVoice`.
+ */
+export interface SendVoiceStatusRequest {
+  audio: StatusMediaInput;
+  /** Recipient JIDs. Required on the Baileys engine (absent/empty → 400); omit on whatsapp-web.js, which broadcasts instead. */
+  recipients?: string[];
+  /** Background colour as `#RRGGBB`, rendered behind the voice-note bubble. Baileys only; whatsapp-web.js ignores it. */
+  backgroundColor?: string;
 }
 
 // ── Health ────────────────────────────────────────────────────────
@@ -807,6 +1037,16 @@ export interface PaginatedProducts {
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }
 
+/**
+ * Response of `send-product`. The route answers with the sent message's id under `id`, not the
+ * `messageId` the other send routes use.
+ */
+export interface ProductMessageResponse {
+  id: string;
+  /** Unix SECONDS the engine stamped on the outgoing message. */
+  timestamp: number;
+}
+
 export interface SendProductRequest {
   chatId: Jid;
   productId: string;
@@ -872,4 +1112,27 @@ export interface SearchResults {
   tookMs: number;
   /** Which provider answered (id), e.g. `builtin-fts`. */
   provider: string;
+}
+
+/** Media to convert: exactly one of `url` or `base64`; `base64` wins if both are given. */
+export interface ConvertMediaInput {
+  /** Public http(s) URL the server fetches (SSRF-guarded). */
+  url?: string;
+  /** Inline bytes. No mimetype is needed — the input format is read from the bytes. */
+  base64?: string;
+}
+
+/** The converted media, in the shape a send endpoint accepts. */
+export interface ConvertedMedia {
+  /** Converted bytes, ready to pass as a send endpoint's `base64`. */
+  base64: string;
+  /** What the bytes now are — not what they were. */
+  mimetype: string;
+  /** Decoded size, so a size check needs no decoding. */
+  bytes: number;
+}
+
+/** Whether server-side conversion can actually be used on this deployment. */
+export interface MediaConversionAvailability {
+  available: boolean;
 }

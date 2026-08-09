@@ -91,7 +91,7 @@ const EVICTION_MESSAGES: Record<ApiKeyEvictionReason, string> = {
 })
 export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
   private logger = new Logger('EventsGateway');
 
@@ -284,6 +284,12 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
       (client.data as { apiKey: unknown; rawApiKey: string }).apiKey = validKey;
       (client.data as { rawApiKey: string }).rawApiKey = apiKey;
       this.trackSocket(validKey.id, client);
+      // The handshake window is charged pre-auth to keep an unauthenticated flood off the DB. This
+      // one turned out to be authentic, so give the slot back: the window then bounds FAILED
+      // handshakes, and authenticated connections stay bounded by maxSocketsPerKey above. Without
+      // this, every client behind one NAT/proxy IP shares a 10/min budget and normal dashboard
+      // re-mounts lock each other out.
+      this.handshakeLimiter.refund(clientIp);
       this.logger.log(`Client connected: ${client.id} (key: ${validKey.name})`);
     } catch (error) {
       this.logger.warn(`Client ${client.id} rejected: Auth error`, {
@@ -534,6 +540,44 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
   }
 
   /**
+   * Emit a restriction change (imposed or lifted), mirroring the `session.restriction` webhook
+   * payload. Needed live because a restriction can arrive with no status transition at all (the
+   * Baileys reachout timelock rides a connect probe) — without this push the dashboard badge only
+   * appeared on a full page reload.
+   */
+  emitSessionRestriction(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'session.restriction', data);
+  }
+
+  /**
+   * The end of a ringing call, one method per outcome.
+   *
+   * Three methods rather than one taking the name as a parameter: the drift guard discovers emitters
+   * by reflection and invokes each with an empty payload, so a parameterised name would leave the
+   * event catalog unverifiable — exactly the drift the guard exists to catch.
+   */
+  emitCallAccepted(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'call.accepted', data);
+  }
+
+  emitCallRejected(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'call.rejected', data);
+  }
+
+  emitCallMissed(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'call.missed', data);
+  }
+
+  /**
+   * Emit a presence update. Socket-subscribable as well as webhook-delivered because presence is the
+   * one event whose whole value is being live — a webhook round-trip to render a typing indicator
+   * has usually expired by the time it arrives. Only actual changes reach here (see the wiring).
+   */
+  emitPresenceUpdate(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'presence.update', data);
+  }
+
+  /**
    * Emit QR code update for a session
    */
   emitQRCode(sessionId: string, qrCode: string) {
@@ -606,6 +650,16 @@ export class EventsGateway implements OnGatewayInit, OnGatewayConnection, OnGate
    */
   emitGroupUpdate(sessionId: string, data: Record<string, unknown>) {
     this.emitToRooms(sessionId, 'group.update', data);
+  }
+
+  /**
+   * Emit a pending join request (someone asked to join a group the account admins, join-approval
+   * on). Payload mirrors the `group.join_request` webhook:
+   * `{ groupId, participantIds, timestamp, actorId? }` — participantIds are the users asking to
+   * join; actorId is who created the request when the engine reports one.
+   */
+  emitGroupJoinRequest(sessionId: string, data: Record<string, unknown>) {
+    this.emitToRooms(sessionId, 'group.join_request', data);
   }
 
   /**

@@ -1,5 +1,5 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
-import { SessionService } from '../session/session.service';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { EngineRegistry } from '../../engine/engine-registry.service';
 import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 
 /**
@@ -10,14 +10,11 @@ import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interfa
 export class ChannelService {
   private static readonly MAX_CHANNEL_HISTORY_LIMIT = 100;
 
-  constructor(private readonly sessionService: SessionService) {}
+  constructor(private readonly engines: EngineRegistry) {}
 
   private getEngine(sessionId: string): IWhatsAppEngine {
-    const engine = this.sessionService.getEngine(sessionId);
-    if (!engine) {
-      throw new BadRequestException('Session is not started');
-    }
-    return engine;
+    // EngineRegistry.require()'s default is this exact 400 "Session is not started".
+    return this.engines.require(sessionId);
   }
 
   getSubscribedChannels(sessionId: string) {
@@ -42,6 +39,21 @@ export class ChannelService {
       ? Math.min(Math.max(Math.trunc(limit), 1), ChannelService.MAX_CHANNEL_HISTORY_LIMIT)
       : 50;
     return this.getEngine(sessionId).getChannelMessages(channelId, safeLimit);
+  }
+
+  /** Create a channel. The account owns it, which is what makes deleting it possible later. */
+  createChannel(sessionId: string, name: string, description?: string) {
+    return this.getEngine(sessionId).createChannel(name, description);
+  }
+
+  /** Delete a channel this account owns. Irreversible, and its subscribers lose it. */
+  deleteChannel(sessionId: string, channelId: string) {
+    return this.getEngine(sessionId).deleteChannel(channelId);
+  }
+
+  /** Mute or unmute a channel's notifications. Subscription is untouched either way. */
+  muteChannel(sessionId: string, channelId: string, mute: boolean) {
+    return this.getEngine(sessionId).muteChannel(channelId, mute);
   }
 
   subscribeToChannel(sessionId: string, inviteCode: string) {

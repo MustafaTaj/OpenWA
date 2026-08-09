@@ -235,6 +235,7 @@
     "qr_ready": "סריקת QR",
     "ready": "מחובר",
     "disconnected": "מנותק",
+    "action_required": "נדרשת פעולה",
     "failed": "נכשל",
     "authenticating": "מאמת..."
   },
@@ -296,13 +297,16 @@
       "phone": "מספר טלפון",
       "phoneNone": "לא מחובר",
       "created": "נוצר בתאריך",
-      "lastActive": "פעילות אחרונה"
+      "lastActive": "פעילות אחרונה",
+      "autoRejectCalls": "דחיית שיחות אוטומטית",
+      "autoRejectCallsHint": "שיחות נכנסות נדחות ברגע שהן מצלצלות. ה-webhook call.received עדיין נשלח לפני כן. חל מהשיחה הבאה — ללא צורך בהפעלה מחדש."
     },
     "actions": {
       "view": "צפייה",
       "start": "הפעלה",
       "stop": "עצירה",
       "reconnect": "התחברות מחדש",
+      "unlink": "ביטול קישור",
       "delete": "מחיקה",
       "killStuck": "סגור תקוע"
     },
@@ -311,6 +315,8 @@
       "readyDesc": "ה-Session של WhatsApp מחובר",
       "disconnectedTitle": "ה-Session נותק",
       "disconnectedDesc": "ה-Session של WhatsApp נותק",
+      "actionRequiredTitle": "נדרשת פעולה",
+      "actionRequiredDesc": "ה-Session הזה דורש את תשומת לבך. פתחו את ה-Session כדי לראות מה לעשות.",
       "failedTitle": "ה-Session נכשל",
       "failedDesc": "ה-Session של WhatsApp נכשל באתחול. פתחו את ה-Session כדי לראות את הסיבה."
     },
@@ -318,7 +324,8 @@
       "phone": "טלפון",
       "sessionId": "מזהה Session",
       "lastActive": "פעילות אחרונה",
-      "error": "שגיאה"
+      "error": "שגיאה",
+      "restriction": "הגבלה"
     },
     "forceKill": {
       "title": "סגירת סשן תקוע",
@@ -329,6 +336,18 @@
       "success": "הסשן נסגר בכוח. ניתן להפעיל אותו מחדש כעת.",
       "failedTitle": "הסגירה בכוח נכשלה",
       "failed": "סגירת הסשן בכוח נכשלה."
+    },
+    "unlink": {
+      "title": "ביטול קישור המכשיר",
+      "message": "לבטל את קישור הסשן <strong>\"{{name}}\"</strong> מחשבון הוואטסאפ?",
+      "warning": "וואטסאפ תסיר מכשיר זה מרשימת המכשירים המקושרים של החשבון והסשן ייעצר. ההתחברות מחדש דורשת סריקת QR חדשה או קוד התאמה. כדי למחוק גם את כל הנתונים המקומיים, מחק את הסשן לאחר מכן.",
+      "confirm": "ביטול קישור",
+      "successTitle": "המכשיר נותק",
+      "success": "ביטול הקישור הושלם: המכשיר נותק ואישורי הסשן המקומיים נמחקו. חיבור מחדש דורש סריקת QR חדשה או קוד הוראה.",
+      "failedTitle": "ביטול הקישור נכשל",
+      "failed": "לא ניתן לבטל את קישור הסשן.",
+      "incompleteTitle": "ביטול קישור חלקי",
+      "incomplete": "הסשן נעצר מקומית, אך פעולת ההתנתקות אינה מושלמת — ייתכן שהמכשיר עדיין מקושר. הפעל את הסשן ונסה שוב את ביטול הקישור."
     },
     "pairing": {
       "tabQr": "קוד QR",
@@ -347,6 +366,16 @@
       "step3": "<strong>3.</strong> יש להקיש על <strong>קישור מכשיר</strong>, ולאחר מכן על <strong>קישור עם מספר טלפון במקום זאת</strong>",
       "step4": "<strong>4.</strong> יש להזין במכשיר את הקוד בן 8 התווים המוצג למעלה",
       "waitingConnection": "ממתין לקישור המכשיר שלך…"
+    },
+    "start": {
+      "teardownPendingTitle": "הפעלת סשן",
+      "teardownPending": "פירוק אישורים לסשן זה עדיין מתבצע. המתן רגע ונסה שוב."
+    },
+    "restriction": {
+      "reachout_timelock": "צ׳אטים חדשים חסומים",
+      "tos_block": "נחסם על ידי WhatsApp",
+      "proxy_block": "החיבור חסום",
+      "until": "עד {{date}}"
     }
   },
   "webhooks": {
@@ -749,7 +778,8 @@
     "toasts": {
       "saveFailed": "השמירה נכשלה"
     },
-    "envPinNote": "מקובע על ידי משתנה סביבה — זהו הערך הפעיל; שינויים בלוח הבקרה לא ייכנסו לתוקף עד שמשתנה זה יבוטל.",
+    "envPinNote": "מקובע על ידי משתנה הסביבה {{name}} — זהו הערך הפעיל; שינויים בלוח הבקרה לא ייכנסו לתוקף עד שמשתנה זה יבוטל.",
+    "pendingRestartNote": "נשמר, אך טרם הוחל — הפעילו מחדש את השרת כדי שהשינוי ייכנס לתוקף.",
     "migration": {
       "title": "שימו לב — פעולה זו משנה את מנגנון אחסון הנתונים",
       "dbWarning": "מסד הנתונים החדש מתחיל ריק. הורידו עכשיו גיבוי של הנתונים הנוכחיים (בעודכם עדיין על מסד הנתונים הישן), ולאחר מכן שחזרו אותו לאחר ההפעלה מחדש.",
@@ -760,6 +790,8 @@
       "export": "ייצוא נתונים",
       "import": "ייבוא נתונים",
       "exportFailed": "לא ניתן לייצא את הנתונים",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "לא ניתן לייבא את הנתונים",
       "importOk": "הנתונים יובאו",
       "importConfirm": "הייבוא יחליף את כל הנתונים הנוכחיים בגיבוי ({{rows}} שורות). לא ניתן לבטל פעולה זו. להמשיך?",

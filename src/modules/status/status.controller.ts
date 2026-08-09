@@ -1,11 +1,13 @@
 import { Controller, Get, Post, Delete, Param, Body, Res, StreamableFile } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { StatusDeletedResponseDto, StatusListResponseDto, StatusResultDto } from './dto/status-response.dto';
 import { StatusService } from './status.service';
 import { SendTextStatusDto } from './dto/send-text-status.dto';
-import { SendImageStatusDto, SendVideoStatusDto } from './dto/send-media-status.dto';
+import { SendImageStatusDto, SendVideoStatusDto, SendVoiceStatusDto } from './dto/send-media-status.dto';
 import { RequireRole } from '../auth/decorators/auth.decorators';
 import { ApiKeyRole } from '../auth/entities/api-key.entity';
+import { ENGINE_NOT_READY_409, SESSION_NOT_STARTED_404 } from '../../common/openapi/engine-status-responses';
 
 @ApiTags('status')
 @Controller('sessions/:sessionId/status')
@@ -14,14 +16,18 @@ export class StatusController {
 
   @Get()
   @ApiOperation({ summary: 'Get all contact status updates' })
-  @ApiResponse({ status: 200, description: 'Status updates visible to the session, grouped by contact.' })
+  @ApiResponse({
+    status: 200,
+    description: 'Status updates visible to the session, grouped by contact.',
+    type: StatusListResponseDto,
+  })
   async getStatuses(@Param('sessionId') sessionId: string) {
     return { statuses: await this.statusService.getStatuses(sessionId) };
   }
 
   @Get(':contactId')
   @ApiOperation({ summary: 'Get status updates from a specific contact' })
-  @ApiResponse({ status: 200, description: 'Status updates from the requested contact.' })
+  @ApiResponse({ status: 200, description: 'Status updates from the requested contact.', type: StatusListResponseDto })
   async getContactStatus(@Param('sessionId') sessionId: string, @Param('contactId') contactId: string) {
     return { statuses: await this.statusService.getContactStatus(sessionId, contactId) };
   }
@@ -30,7 +36,11 @@ export class StatusController {
   // route above regardless of declaration order — Nest/Express match on segment count.
   @Get(':statusId/media')
   @ApiOperation({ summary: 'Stream a stored status media file' })
-  @ApiResponse({ status: 200, description: 'The status image/video bytes.' })
+  @ApiResponse({
+    status: 200,
+    description: 'The status image/video bytes.',
+    content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
+  })
   @ApiResponse({ status: 404, description: 'No stored media (text status, omitted, or expired).' })
   async getStatusMedia(
     @Param('sessionId') sessionId: string,
@@ -50,8 +60,11 @@ export class StatusController {
     description:
       'Text status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts ' +
       "to the account's status-privacy audience.",
+    type: StatusResultDto,
   })
   @ApiResponse({ status: 400, description: 'Invalid request, or the post was blocked by a plugin.' })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendTextStatus(@Param('sessionId') sessionId: string, @Body() dto: SendTextStatusDto) {
     return this.statusService.postTextStatus(sessionId, dto.text, {
       recipients: dto.recipients,
@@ -68,12 +81,15 @@ export class StatusController {
     description:
       'Image status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts ' +
       "to the account's status-privacy audience.",
+    type: StatusResultDto,
   })
   @ApiResponse({
     status: 400,
     description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
   })
   @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendImageStatus(@Param('sessionId') sessionId: string, @Body() dto: SendImageStatusDto) {
     return this.statusService.postImageStatus(sessionId, dto.image, {
       recipients: dto.recipients,
@@ -89,12 +105,15 @@ export class StatusController {
     description:
       'Video status posted. The recipients allow-list is honored on Baileys only; whatsapp-web.js broadcasts ' +
       "to the account's status-privacy audience.",
+    type: StatusResultDto,
   })
   @ApiResponse({
     status: 400,
     description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
   })
   @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async sendVideoStatus(@Param('sessionId') sessionId: string, @Body() dto: SendVideoStatusDto) {
     return this.statusService.postVideoStatus(sessionId, dto.video, {
       recipients: dto.recipients,
@@ -102,10 +121,37 @@ export class StatusController {
     });
   }
 
+  @Post('send-voice')
+  @RequireRole(ApiKeyRole.OPERATOR)
+  @ApiOperation({ summary: 'Post an audio status as a voice note' })
+  @ApiResponse({
+    status: 201,
+    description:
+      'Voice status posted. WhatsApp plays a status voice note only as Ogg/Opus and neither engine ' +
+      'transcodes, so convert first via POST /media/convert/voice. The recipients allow-list is honored ' +
+      "on Baileys only; whatsapp-web.js broadcasts to the account's status-privacy audience.",
+    type: StatusResultDto,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Neither url nor base64 provided, or the post was blocked by a plugin.',
+  })
+  @ApiResponse({ status: 413, description: 'Base64 media exceeds MEDIA_DOWNLOAD_MAX_BYTES.' })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
+  async sendVoiceStatus(@Param('sessionId') sessionId: string, @Body() dto: SendVoiceStatusDto) {
+    return this.statusService.postVoiceStatus(sessionId, dto.audio, {
+      recipients: dto.recipients,
+      backgroundColor: dto.backgroundColor,
+    });
+  }
+
   @Delete(':statusId')
   @RequireRole(ApiKeyRole.OPERATOR)
   @ApiOperation({ summary: 'Delete own status' })
-  @ApiResponse({ status: 200, description: 'Status deleted.' })
+  @ApiResponse({ status: 200, description: 'Status deleted.', type: StatusDeletedResponseDto })
+  @ApiResponse({ status: 409, description: ENGINE_NOT_READY_409 })
+  @ApiResponse({ status: 404, description: SESSION_NOT_STARTED_404 })
   async deleteStatus(@Param('sessionId') sessionId: string, @Param('statusId') statusId: string) {
     await this.statusService.deleteStatus(sessionId, statusId);
     return { message: 'Status deleted successfully' };

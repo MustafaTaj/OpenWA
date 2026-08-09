@@ -84,9 +84,28 @@ jobs:
       - name: Check OpenAPI snapshot is up to date
         run: npm run openapi:check
 
+      # The same gate ci.yml runs. Its comment there notes this workflow never ran it, which is the
+      # gap: a tag pushed with `--follow-tags` starts both workflows, and only the branch one could
+      # see an SDK left behind by a contract change. The release path has to stand on its own.
+      - name: Check SDK routes against the contract
+        run: npm run check:sdk-routes
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    # Mirrors ci.yml's test job. Without this service the queue-on e2e suite self-skips and the
+    # release path reports green on a suite it never actually ran — the tag is the one place that
+    # must not be verified less than the branch it came from.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -102,8 +121,16 @@ jobs:
       - name: Run unit tests
         run: npm test -- --coverage
 
+      # jest's rootDir is src/, so the repo-level script specs run on the plain node runner and were
+      # absent from the tag path entirely.
+      - name: Run script unit tests
+        run: npm run test:scripts
+
       - name: Run e2e smoke tests
         run: npm run test:e2e
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: '6379'
 
   test-postgres:
     name: Test (PostgreSQL migrations)
@@ -181,6 +208,11 @@ jobs:
       - name: Run ESLint
         run: cd dashboard && npm run lint
 
+      # The root format:check globs are anchored at the repo root and never reach dashboard/, so
+      # this is the only gate on dashboard formatting — and it was present on the branch path only.
+      - name: Check formatting
+        run: cd dashboard && npm run format:check
+
       - name: Type-check dashboard tests
         run: cd dashboard && npm run typecheck
 
@@ -193,10 +225,30 @@ jobs:
       - name: Run dashboard unit tests
         run: cd dashboard && npm run test:unit
 
+  # Mirrors ci.yml's scripts-smoke job, which had no counterpart here at all: the shell scripts that
+  # ship inside the image were linted and exercised on the branch path and on nothing else.
+  scripts-smoke:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install sqlite3
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends sqlite3
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: shellcheck every shell script
+        run: shellcheck docker-entrypoint.sh scripts/*.sh
+
+      - name: Run backup/restore smoke test
+        run: ./scripts/smoke-test-backup-restore.sh
+
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test, dashboard]
+    needs: [lint, test, dashboard, scripts-smoke]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -287,7 +339,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -336,6 +388,15 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Never serve the production stage's `apt-get update && apt-get install` from cache. That
+          # layer's cache key is its own command text, which does not change when Debian publishes a
+          # security update — so a cached hit silently installs whatever the apt index held when the
+          # layer was first built, and the release image ships known-vulnerable packages. It is not a
+          # theoretical risk: the first two v0.12.3 attempts installed chromium 150.0.7871.181 from a
+          # cached layer while bookworm-security already carried 151.0.7922.71 on BOTH architectures,
+          # and image-scan failed with 228 then 240 findings. The builder stage keeps its cache, so
+          # only the OS-package layer is rebuilt.
+          no-cache-filters: production
 
   # ──── Boot Smoke (amd64 + arm64) ──────────────────────────────────
   # The docker job proves the image BUILDS for both architectures; this proves the just-pushed image
@@ -355,7 +416,7 @@ jobs:
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -427,8 +488,13 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
+      # Needed for .trivyignore: the scan reads the image from the registry, but the ignore file
+      # is repo state and trivy-action resolves it from the workspace — without a checkout the
+      # file simply is not there and every entry is silently inert.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -455,6 +521,9 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '1'
+          # Explicit rather than implicit: each entry in .trivyignore carries a written
+          # justification and a condition for removing it.
+          trivyignores: .trivyignore
 
   # Applies the release tags (X.Y.Z — plus X.Y and latest for non-prereleases) to the image
   # boot-smoke just proved can start, on BOTH registries (GHCR + Docker Hub — the tag set computed
@@ -475,7 +544,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -485,7 +554,7 @@ jobs:
       # pull count lives (GHCR exposes no download metrics). Requires the DOCKERHUB_USERNAME /
       # DOCKERHUB_TOKEN repo secrets; without them this step fails before any tag is applied.
       - name: Login to Docker Hub
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

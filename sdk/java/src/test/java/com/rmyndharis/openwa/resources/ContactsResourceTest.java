@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.rmyndharis.openwa.ClientConfig;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.HttpMethod;
+import com.rmyndharis.openwa.model.UpsertContactRequest;
 import com.rmyndharis.openwa.model.ListContactsQuery;
 import com.rmyndharis.openwa.model.ProfilePicturesResponse;
 import com.rmyndharis.openwa.support.MockTransport;
@@ -92,6 +93,18 @@ class ContactsResourceTest {
         tx.respond(200, "{\"success\":true}");
         client.contacts.unblock("s", "a@c.us");
         assertEquals("http://h/api/sessions/s/contacts/a@c.us/block", tx.lastRequest().url());
+        assertEquals(HttpMethod.DELETE, tx.lastRequest().method());
+    }
+
+    @Test
+    void addressbookUpsertAndDelete() {
+        tx.respond(200, "{\"success\":true}");
+        client.contacts.upsert("s", "628@c.us", UpsertContactRequest.builder().firstName("Ada").build());
+        assertEquals("http://h/api/sessions/s/contacts/628@c.us", tx.lastRequest().url());
+        assertEquals(HttpMethod.PUT, tx.lastRequest().method());
+
+        tx.respond(200, "{\"success\":true}");
+        client.contacts.delete("s", "628@c.us");
         assertEquals(HttpMethod.DELETE, tx.lastRequest().method());
     }
 }

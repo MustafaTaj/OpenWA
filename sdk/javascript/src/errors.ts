@@ -80,6 +80,16 @@ export class OpenWARateLimitError extends OpenWAApiError {}
 /** 501 Not Implemented — the active engine does not support this operation. */
 export class OpenWANotImplementedError extends OpenWAApiError {}
 
+/**
+ * 503 Service Unavailable — a transport failure, not a refusal. The gateway answers this when the
+ * engine did not confirm the operation in time: WhatsApp never replied, the socket was down, or the
+ * request budget ran out. **Retryable**, unlike every other typed error here.
+ *
+ * Not every 503 is safe to repeat blindly: the non-idempotent sends (group create, channel create,
+ * media send) are deliberately left unbounded by the gateway precisely so they never answer one.
+ */
+export class OpenWAServiceUnavailableError extends OpenWAApiError {}
+
 /** Thrown when a request exceeds the configured timeout. */
 export class OpenWATimeoutError extends OpenWAError {
   constructor(timeoutMs: number) {
@@ -106,6 +116,8 @@ export function classifyApiError(status: number, message: string, body: unknown,
       return new OpenWARateLimitError(message, status, body, errorKind);
     case 501:
       return new OpenWANotImplementedError(message, status, body, errorKind);
+    case 503:
+      return new OpenWAServiceUnavailableError(message, status, body, errorKind);
     default:
       return new OpenWAApiError(message, status, body, errorKind);
   }

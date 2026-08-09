@@ -1,15 +1,18 @@
-import { Injectable, BadRequestException, Optional } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm';
 import { SessionService } from '../session/session.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
+import { MessageProjector } from '../session/message-projector.service';
 import { SendTextMessageDto, SendMediaMessageDto, SendAudioMessageDto, MessageResponseDto } from './dto';
 import { SendTemplateMessageDto } from './dto/send-template.dto';
 import { assertBase64WithinMediaCap, stripBase64DataUri } from './media-cap.util';
 import { MediaInput, IWhatsAppEngine, MessageResult } from '../../engine/interfaces/whatsapp-engine.interface';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { HookManager, applySendingGate } from '../../core/hooks';
+import { SendPacingService, countsTowardSendBreaker } from './send-pacing.service';
 import { TemplateService } from '../template/template.service';
 import { renderTemplate } from '../../common/utils/template-render';
 import { createLogger } from '../../common/services/logger.service';
@@ -18,6 +21,8 @@ import { parseWaId } from '../../engine/identity/wa-id';
 import { resolveFeatureFlags } from '../../config/feature-flags';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
 import { isUniqueConstraintError } from '../../common/utils/unique-constraint.util';
+import { ChatMediaArchiveService } from '../chat-media/chat-media-archive.service';
+import { StorageService, isMissingObjectError } from '../../common/storage/storage.service';
 
 export interface GetMessagesOptions {
   chatId?: string;
@@ -29,6 +34,33 @@ export interface GetMessagesOptions {
 
 /** Default cap on a rendered template's final text; overridable via TEMPLATE_RENDER_MAX_CHARS. */
 export const DEFAULT_TEMPLATE_RENDER_MAX_CHARS = 64 * 1024;
+
+/** Pin window applied when the caller does not choose one — WhatsApp's own default of 24h. */
+export const DEFAULT_PIN_DURATION_SECONDS = 86400;
+
+/**
+ * Mimetypes an archived chat-media file may be served as. Everything else — documents, and notably
+ * `image/svg+xml`, which is scriptable despite the `image/` prefix — is served as inert
+ * octet-stream so the media endpoint cannot host active content on the API origin.
+ */
+const INERT_MEDIA_MIMETYPE =
+  /^(image\/(jpeg|png|gif|webp|bmp)|video\/(mp4|webm|quicktime|3gpp)|audio\/(mpeg|mp4|ogg|aac|wav|webm))(;|$)/;
+
+/** The declared mimetype when it is safe to echo back, else inert octet-stream. */
+function inertMimetype(mimetype: string): string {
+  return INERT_MEDIA_MIMETYPE.test(mimetype) ? mimetype : 'application/octet-stream';
+}
+
+/**
+ * True when this write's media is only a remote-URL pointer (a URL-based send, whose bytes the
+ * engine fetches and discards). Merging such metadata onto an echo row would REPLACE bytes the
+ * gateway already downloaded — wwjs enriches its own-send echo with the real payload — leaving a
+ * row that renders as a bare marker and that the archive cannot use.
+ */
+function isUrlPointerMetadata(metadata: Record<string, unknown> | undefined): boolean {
+  const data = (metadata as { media?: { data?: unknown } } | undefined)?.media?.data;
+  return typeof data === 'string' && /^https?:\/\//i.test(data);
+}
 
 /**
  * Outbound sends are executed directly against the WhatsApp engine, not via a BullMQ queue.
@@ -53,14 +85,30 @@ export class MessageService {
     @InjectRepository(Message, 'data')
     private readonly messageRepository: Repository<Message>,
     private readonly sessionService: SessionService,
+    private readonly engines: EngineRegistry,
+    private readonly messageProjector: MessageProjector,
     private readonly hookManager: HookManager,
     private readonly templateService: TemplateService,
     private readonly lidMappingStore: LidMappingStoreService,
+    // Required, not @Optional: a missing pacing service would silently mean "no pacing", which is
+    // the one failure mode this feature must not have. The service itself no-ops when disabled.
+    private readonly pacing: SendPacingService,
     @Optional()
     private readonly configService?: ConfigService,
+    // Optional so the existing standalone constructions keep working; absent (like a disabled
+    // archive) means the media read endpoint serves only the inline row copy, never archived files.
+    @Optional()
+    private readonly chatMediaArchive?: ChatMediaArchiveService,
+    @Optional()
+    private readonly storageService?: StorageService,
   ) {}
 
   async sendText(sessionId: string, dto: SendTextMessageDto): Promise<MessageResponseDto> {
+    // Asking to suppress the preview AND to attach one is a contradiction, and guessing which half
+    // the caller meant would send a message they did not ask for either way.
+    if (dto.linkPreview === false && dto.customLinkPreview) {
+      throw new BadRequestException('linkPreview: false cannot be combined with customLinkPreview');
+    }
     const finalDto = await this.applySendingGate(sessionId, 'text', dto);
 
     const engine = this.getEngine(sessionId);
@@ -77,18 +125,30 @@ export class MessageService {
 
     let result: MessageResult;
     try {
-      // Keep the 2-arg call shape for plain sends; only pass mentions when the caller supplied any.
-      result = finalDto.mentions?.length
-        ? await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions)
-        : await engine.sendTextMessage(finalDto.chatId, finalDto.text);
+      // The call is widened ONLY as far as the caller actually asked. A send with neither mentions
+      // nor a preview choice keeps its two-argument shape, and one with mentions alone keeps its
+      // three — trailing `undefined`s would be harmless to the engines but would rewrite the call
+      // shape of every existing send for no behavioural gain.
+      const { linkPreview, customLinkPreview } = finalDto;
+      if (linkPreview !== undefined || customLinkPreview) {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions, {
+          ...(linkPreview === undefined ? {} : { linkPreview }),
+          ...(customLinkPreview ? { customPreview: customLinkPreview } : {}),
+        });
+      } else if (finalDto.mentions?.length) {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text, finalDto.mentions);
+      } else {
+        result = await engine.sendTextMessage(finalDto.chatId, finalDto.text);
+      }
     } catch (error) {
       // The SEND itself failed — mark FAILED + fire message:failed (a post-send persistence fault is
       // handled separately by persistSentState and must NOT land here).
       return this.failSend(sessionId, 'text', message, finalDto, error);
     }
 
-    // Note: the `message:sent` hook is emitted solely by SessionService.onMessageCreate (engine
-    // `message_create`) with a consistent IncomingMessage payload for ALL sends (text, media,
+    // Note: the `message:sent` hook is emitted solely by the onMessageCreate wiring in
+    // SessionEngineLifecycle (engine `message_create`, handled by MessageProjector) with a
+    // consistent IncomingMessage payload for ALL sends (text, media,
     // and phone-composed), so it is intentionally not fired here to avoid a double dispatch.
     return this.persistSentState(message, result);
   }
@@ -100,7 +160,18 @@ export class MessageService {
    * reply/forward) and edit — passes through the same moderation chokepoint, instead of only
    * `sendText`. The implementation is shared with StatusService via core/hooks/sending-gate.
    */
-  private applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+  private async applySendingGate<T extends object>(sessionId: string, type: string, input: T): Promise<T> {
+    // Pacing runs BEFORE the plugin gate, so a send that policy forbids never reaches a plugin at
+    // all — plugins should not be asked to moderate, or given the chance to rewrite, traffic that is
+    // not going to be sent. The consequence is deliberate and documented in the hook contract: a
+    // paced-out send fires no `message:sending`, so a plugin cannot observe it. Refusals are a 429
+    // carrying `code: SEND_PACING_LIMITED`; a plugin veto stays a 400.
+    // Every gated sender's DTO addresses its destination as `chatId` except forward, which uses
+    // `toChatId` — without the fallback a forward skipped the cold-reachout gate entirely, while
+    // its persisted row still drained the cold budget. Edit carries a chatId too; the edited
+    // message's own row already makes that chat warm, so the gate is a no-op there.
+    const target = input as { chatId?: string; toChatId?: string };
+    await this.pacing.assertSendAllowed(sessionId, target.chatId ?? target.toChatId);
     return applySendingGate(this.hookManager, sessionId, type, input, 'MessageService');
   }
 
@@ -118,6 +189,13 @@ export class MessageService {
     input: unknown,
     error: unknown,
   ): Promise<never> {
+    // Only failures that say something about the account's standing feed the breaker: adapters also
+    // raise client-fault and engine-state errors from inside this call (a blocked media URL, an
+    // unsupported capability, a disconnected socket), and counting those let a client sending bad
+    // requests trip the breaker on a healthy session.
+    if (countsTowardSendBreaker(error)) {
+      this.pacing.recordSendFailure(sessionId);
+    }
     await this.saveFailedMessage(message);
     // Sanitize the hook payload: an SSRF block's raw .message names the resolved internal address
     // (a recon/DNS-rebind oracle) — the client-facing throw below already maps it to a generic
@@ -548,6 +626,12 @@ export class MessageService {
    * Save outgoing message to database.
    * When called before sending, creates a record with PENDING status; bulk send reuses this after a
    * successful send (status SENT) so batch messages are persisted like single sends.
+   *
+   * A caller that already knows the engine id races the own-send echo on
+   * UNIQUE(sessionId, waMessageId) — only the bulk path does today, since every single send persists
+   * its PENDING row before the id exists. Losing that race merges onto the echo's row rather than
+   * failing, mirroring `persistSentState`: the echo carries only what the engine reported (for a
+   * Baileys API send, a media-less marker), so dropping this write would lose the media payload.
    */
   async saveOutgoingMessage(
     sessionId: string,
@@ -581,7 +665,23 @@ export class MessageService {
       status: data.status ?? MessageStatus.PENDING,
       metadata: data.metadata,
     });
-    const saved = await this.messageRepository.save(message);
+    const saved = await this.messageRepository.save(message).catch(async (err: unknown) => {
+      const waMessageId = message.waMessageId;
+      if (!waMessageId || !isUniqueConstraintError(err)) throw err;
+      const patch: QueryDeepPartialEntity<Message> = {
+        status: message.status,
+        timestamp: message.timestamp,
+      };
+      // Only when this write actually carries metadata worth merging: a text item must not blank
+      // the echo's, and a URL pointer must not replace bytes the engine already downloaded.
+      if (message.metadata && !isUrlPointerMetadata(message.metadata)) {
+        patch.metadata = message.metadata as QueryDeepPartialEntity<Record<string, unknown>>;
+      }
+      await this.messageRepository.update({ sessionId, waMessageId }, patch);
+      const surviving = await this.messageRepository.findOne({ where: { sessionId, waMessageId } });
+      if (!surviving) throw err;
+      return surviving;
+    });
     this.emitPersisted(sessionId, saved);
     return saved;
   }
@@ -592,10 +692,23 @@ export class MessageService {
   // transition (SENT / FAILED / merge) — so a provider's copy never stays stuck at PENDING (#906).
   // The payload is a shallow snapshot: the same entity instance is mutated as the send progresses
   // (PENDING → SENT/FAILED), and fire-and-forget execution must still see the state at emission time.
+  //
+  // Outbound archiving rides the same chokepoint rather than a call at each of the four persist
+  // sites: every terminal state of an outbound row passes here. Gated on SENT because a PENDING row
+  // may still be deleted by the dedup merge or rewritten by the pending reaper, and a FAILED one has
+  // had its payload stripped — archiving either would strand a file the row never points at.
   private emitPersisted(sessionId: string, message: Message): void {
     void this.hookManager
       .execute('message:persisted', { sessionId, message: { ...message } }, { sessionId, source: 'MessageService' })
       .catch(() => undefined);
+    if (message.status === MessageStatus.SENT && this.archiveOutboundEnabled) {
+      void this.chatMediaArchive?.archive(message).catch(() => undefined);
+    }
+  }
+
+  /** Whether media this account sent is archived too — a sub-flag of the archive itself. */
+  private get archiveOutboundEnabled(): boolean {
+    return this.configService?.get<boolean>('chatMedia.archiveOutbound', false) === true;
   }
 
   /**
@@ -624,6 +737,9 @@ export class MessageService {
     // A send whose engine couldn't read the sent message's id back reports an empty id — a forward that
     // can't recover the copy, or a WhatsApp Web build that renamed the id field out from under the
     // engine. Leave waMessageId unset (NULL) so no ack mis-matches it.
+    // The engine accepted the message, so whatever streak the breaker was tracking is over. Recorded
+    // here rather than at each call site for the same reason failSend is: one funnel, twelve senders.
+    this.pacing.recordSendSuccess(message.sessionId);
     if (result.id) message.waMessageId = result.id;
     message.status = MessageStatus.SENT;
     message.timestamp = result.timestamp;
@@ -634,9 +750,10 @@ export class MessageService {
     } catch (persistError) {
       if (result.id && isUniqueConstraintError(persistError)) {
         // The engine's own-send echo (onMessageCreate) won the race and already persisted a row with
-        // this waMessageId. That row carries only a media-less marker — merge our SENT state AND our
-        // metadata (the actual media payload) onto it BEFORE dropping this redundant PENDING row, or
-        // the payload-bearing row is the one that gets deleted and the media is gone after a reload.
+        // this waMessageId. That row carries only what the engine reported — for a Baileys API send,
+        // a media-less marker — so merge our SENT state AND our metadata (the actual media payload)
+        // onto it BEFORE dropping this redundant PENDING row, or the payload-bearing row is the one
+        // that gets deleted and the media is gone after a reload.
         // Best-effort throughout: the send itself already succeeded.
         this.logger.debug(
           `Send echo already persisted ${result.id}; merging state and dropping the redundant pending row`,
@@ -645,7 +762,7 @@ export class MessageService {
           },
         );
         const patch: QueryDeepPartialEntity<Message> = { status: MessageStatus.SENT, timestamp: result.timestamp };
-        if (message.metadata) {
+        if (message.metadata && !isUrlPointerMetadata(message.metadata)) {
           patch.metadata = message.metadata as QueryDeepPartialEntity<Record<string, unknown>>;
         }
         await this.messageRepository
@@ -690,6 +807,63 @@ export class MessageService {
     return engine.getMessageReactions(chatId, messageId);
   }
 
+  /**
+   * Read a message's media: the archived file when one exists, else the inline copy persisted on
+   * the message row. The fallback is what makes media sent BY the account retrievable here — the
+   * archive is written only on the inbound path, but outbound rows carry the payload inline: the
+   * REST send persists it, wwjs downloads it for the own-send echo, and Baileys downloads it for
+   * phone-composed fromMe messages (the Baileys API-send echo alone carries only a marker, which
+   * the REST-persisted copy covers) — #1165. It also serves an inbound message whose archived file
+   * was purged by retention while the inline copy lives on.
+   *
+   * Unlike status media (only ever an image or video), chat media includes documents a sender chose
+   * the type of — so the declared mimetype is echoed back only when it is inert, and the caller
+   * serves the result as an attachment regardless. Both matter: an allow-list alone would still let
+   * `image/svg+xml` through as active content on the API origin.
+   */
+  async getChatMedia(
+    sessionId: string,
+    chatId: string,
+    messageId: string,
+  ): Promise<{ buffer: Buffer; mimetype: string }> {
+    const chatIds = this.resolveJidCandidates(chatId);
+    const media = await this.chatMediaArchive?.getMedia(sessionId, chatIds, messageId);
+    if (media && this.storageService) {
+      try {
+        return { buffer: await this.storageService.getFile(media.path), mimetype: inertMimetype(media.mimetype) };
+      } catch (error) {
+        // The row outlived its file: the retention purge (or a concurrent delete) removed it
+        // between the DB read and this read. Not a server fault — try the inline copy instead.
+        if (!isMissingObjectError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    // Match across dialects like getMessages does: an outbound row stores the caller's literal
+    // chatId (REST persist) or the engine-neutral form (own-send echo) depending on which writer
+    // won the persist race, so a literal match would 404 on half the rows this fallback exists for.
+    const row = await this.messageRepository.findOne({
+      where: { sessionId, chatId: In(chatIds), waMessageId: messageId },
+    });
+    const inline = (row?.metadata as { media?: { data?: unknown; mimetype?: unknown; omitted?: unknown } })?.media;
+    if (
+      !inline ||
+      inline.omitted ||
+      typeof inline.data !== 'string' ||
+      !inline.data ||
+      typeof inline.mimetype !== 'string' ||
+      !inline.mimetype ||
+      // A URL-based send persists the URL STRING as `data` (buildMediaInput: `data: base64 ||
+      // dto.url!`) — the bytes were fetched at send time and never stored. Decoding the URL as
+      // base64 would serve garbage, so report it as absent. Same discriminator as the send path.
+      /^https?:\/\//i.test(inline.data)
+    ) {
+      throw new NotFoundException('No media stored for this message');
+    }
+    return { buffer: Buffer.from(inline.data, 'base64'), mimetype: inertMimetype(inline.mimetype) };
+  }
+
   /** Maximum messages a single getChatHistory call may request from the engine. */
   private static readonly MAX_CHAT_HISTORY_LIMIT = 100;
 
@@ -728,6 +902,47 @@ export class MessageService {
 
   // ========== Delete Message ==========
 
+  /**
+   * Pin a message for a bounded window. Nothing is persisted locally: a pin is chat state owned by
+   * WhatsApp, not a property of our message row, and it expires on WhatsApp's clock — a mirrored
+   * copy here would silently go stale.
+   */
+  async pinMessage(sessionId: string, dto: { chatId: string; messageId: string; durationSeconds?: number }) {
+    const engine = this.getEngine(sessionId);
+    await engine.pinMessage(dto.chatId, dto.messageId, dto.durationSeconds ?? DEFAULT_PIN_DURATION_SECONDS);
+    return { success: true };
+  }
+
+  async unpinMessage(sessionId: string, dto: { chatId: string; messageId: string }) {
+    const engine = this.getEngine(sessionId);
+    await engine.unpinMessage(dto.chatId, dto.messageId);
+    return { success: true };
+  }
+
+  /**
+   * Star or unstar a message. Like a pin, this is WhatsApp-owned state and is not mirrored locally
+   * — but unlike a pin it is private to the account and never expires.
+   *
+   * Best-effort on whatsapp-web.js: its star/unstar resolve void and silently do nothing when
+   * WhatsApp declines the message, so a 200 here means the instruction was delivered, not that the
+   * star is definitely set.
+   */
+  async starMessage(sessionId: string, dto: { chatId: string; messageId: string; star: boolean }) {
+    const engine = this.getEngine(sessionId);
+    await engine.starMessage(dto.chatId, dto.messageId, dto.star);
+    return { success: true };
+  }
+
+  /**
+   * Cast a vote on a poll. Not supported on the Baileys engine, which surfaces as a 501 from the
+   * adapter. `options` are option texts — see the engine interface for why there are no ids.
+   */
+  async votePoll(sessionId: string, dto: { chatId: string; pollMessageId: string; options: string[] }) {
+    const engine = this.getEngine(sessionId);
+    await engine.votePoll(dto.chatId, dto.pollMessageId, dto.options);
+    return { success: true };
+  }
+
   async deleteMessage(
     sessionId: string,
     dto: { chatId: string; messageId: string; forEveryone?: boolean },
@@ -760,16 +975,15 @@ export class MessageService {
     // Best-effort: reflect the new body in the stored copy (mirrors deleteMessage's revoked flag),
     // serialized with the inbound edit/reaction writers through the session's per-message mutation
     // queue. A missing row must not fail the request — the engine edit already succeeded.
-    await this.sessionService.recordOutboundMessageEdit(sessionId, finalDto.messageId, finalDto.body);
+    await this.messageProjector.recordOutboundMessageEdit(sessionId, finalDto.messageId, finalDto.body);
     return { messageId: result.id, timestamp: result.timestamp };
   }
 
   private getEngine(sessionId: string) {
-    const engine = this.sessionService.getEngine(sessionId);
-    if (!engine) {
-      throw new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`);
-    }
-    return engine;
+    return this.engines.require(
+      sessionId,
+      () => new BadRequestException(`Session '${sessionId}' is not active. Start the session first.`),
+    );
   }
 
   /**

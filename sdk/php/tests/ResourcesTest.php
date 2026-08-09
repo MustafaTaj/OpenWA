@@ -14,11 +14,12 @@ class ResourcesTest extends TestCase
     public function testSessionLifecyclePaths(): void
     {
         $backend = new MockBackend();
-        // Queue responses in CALL order: list, get, create, start, stop, forceKill, delete.
+        // Queue responses in CALL order: list, get, create, start, stop, logout, forceKill, delete.
         $backend->on(200, []);
         $backend->on(200, ['id' => 's1', 'name' => 'n', 'status' => 'ready']);
         $backend->on(201, ['id' => 's1', 'name' => 'n', 'status' => 'created']);
         $backend->on(200, ['id' => 's1', 'status' => 'initializing']);
+        $backend->on(200, ['id' => 's1', 'status' => 'disconnected']);
         $backend->on(200, ['id' => 's1', 'status' => 'disconnected']);
         $backend->on(200, ['id' => 's1', 'status' => 'disconnected']);
         $backend->on(204);
@@ -31,6 +32,8 @@ class ResourcesTest extends TestCase
         $client->sessions->start('s1');
         $this->assertStringContainsString('/sessions/s1/start', $backend->lastCall()['path']);
         $client->sessions->stop('s1');
+        $client->sessions->logout('s1');
+        $this->assertStringContainsString('/sessions/s1/logout', $backend->lastCall()['path']);
         $client->sessions->forceKill('s1');
         $this->assertStringContainsString('/sessions/s1/force-kill', $backend->lastCall()['path']);
         $client->sessions->delete('s1');
@@ -235,6 +238,54 @@ class ResourcesTest extends TestCase
         $this->assertStringContainsString('/chats/typing', $backend->calls()[4]['url']);
     }
 
+    public function testChatsClearMessages(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->chats->clearMessages('s', 'a@c.us');
+        $this->assertSame('DELETE', $backend->lastCall()['method']);
+        $this->assertSame('/api/sessions/s/chats/a@c.us/messages', $backend->lastCall()['path']);
+    }
+
+    public function testGroupsPicture(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['url' => 'https://x/p.jpg']);
+        $backend->on(200, ['success' => true]);
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->groups->getPicture('s', 'g@g.us');
+        $this->assertSame('/api/sessions/s/groups/g@g.us/picture', $backend->lastCall()['path']);
+        $client->groups->setPicture('s', 'g@g.us', ['url' => 'https://x/new.jpg']);
+        $this->assertSame('PUT', $backend->lastCall()['method']);
+        $client->groups->deletePicture('s', 'g@g.us');
+        $this->assertSame('DELETE', $backend->lastCall()['method']);
+    }
+
+    public function testContactsAddressbook(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['success' => true]);
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->contacts->upsert('s', 'a@c.us', ['firstName' => 'Ada']);
+        $this->assertSame('PUT', $backend->lastCall()['method']);
+        $this->assertSame('/api/sessions/s/contacts/a@c.us', $backend->lastCall()['path']);
+        $client->contacts->delete('s', 'a@c.us');
+        $this->assertSame('DELETE', $backend->lastCall()['method']);
+    }
+
+    public function testChatsArchive(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->chats->archive('s', ['chatId' => 'a@c.us', 'archive' => true]);
+        $this->assertSame('/api/sessions/s/chats/archive', $backend->lastCall()['path']);
+        $this->assertSame('POST', $backend->lastCall()['method']);
+    }
+
     // ── Status (Stories) ──────────────────────────────────────────────
 
     public function testStatusSendForwardsRequiredRecipientsAndNestedMedia(): void
@@ -243,6 +294,7 @@ class ResourcesTest extends TestCase
         $backend->on(200, ['statusId' => 's1', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
         $backend->on(200, ['statusId' => 's2', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
         $backend->on(200, ['statusId' => 's3', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
+        $backend->on(200, ['statusId' => 's4', 'timestamp' => '2025-01-01T00:00:00.000Z', 'expiresAt' => '2025-01-02T00:00:00.000Z']);
         $client = $backend->makeClient();
         // Server requires `recipients` on every status post; media posts use a nested {image|video:{...}} body.
         $client->status->sendText('s', ['text' => 'hi', 'recipients' => ['a@c.us']]);
@@ -251,6 +303,56 @@ class ResourcesTest extends TestCase
         $this->assertSame(['image' => ['url' => 'http://img'], 'recipients' => ['a@c.us'], 'caption' => 'c'], $backend->lastCall()['body']);
         $client->status->sendVideo('s', ['video' => ['url' => 'http://vid'], 'recipients' => ['a@c.us']]);
         $this->assertSame(['video' => ['url' => 'http://vid'], 'recipients' => ['a@c.us']], $backend->lastCall()['body']);
+        // A voice status wraps its media under `audio` and carries no caption.
+        $client->status->sendVoice('s', ['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['a@c.us']]);
+        $this->assertSame('/api/sessions/s/status/send-voice', $backend->lastCall()['path']);
+        $this->assertSame(['audio' => ['base64' => 'T2dnUw=='], 'recipients' => ['a@c.us']], $backend->lastCall()['body']);
+    }
+
+    public function testVotePollPostsOptionTexts(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->messages->votePoll('s', ['chatId' => 'c1', 'pollMessageId' => 'p1', 'options' => ['Pizza']]);
+        $this->assertSame('/api/sessions/s/messages/vote-poll', $backend->lastCall()['path']);
+        $this->assertSame('POST', $backend->lastCall()['method']);
+    }
+
+    public function testStarPostsTheBooleanThrough(): void
+    {
+        $backend = new MockBackend();
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->messages->star('s', ['chatId' => 'c1', 'messageId' => 'm1', 'star' => false]);
+        $this->assertSame('/api/sessions/s/messages/star', $backend->lastCall()['path']);
+        $this->assertSame('POST', $backend->lastCall()['method']);
+    }
+
+    public function testPinAndUnpinPostToTheirRoutes(): void
+    {
+        $backend = new MockBackend();
+        // Queue responses in CALL order: pin, unpin.
+        $backend->on(200, ['success' => true]);
+        $backend->on(200, ['success' => true]);
+        $client = $backend->makeClient();
+        $client->messages->pin('s', ['chatId' => 'c1', 'messageId' => 'm1', 'durationSeconds' => 604800]);
+        $this->assertSame('/api/sessions/s/messages/pin', $backend->lastCall()['path']);
+        $this->assertSame('POST', $backend->lastCall()['method']);
+        $client->messages->unpin('s', ['chatId' => 'c1', 'messageId' => 'm1']);
+        $this->assertSame('/api/sessions/s/messages/unpin', $backend->lastCall()['path']);
+    }
+
+    public function testMessageMediaReturnsArchivedBytes(): void
+    {
+        $backend = (new MockBackend())->onRaw(200, 'PNG_BYTES', ['Content-Type' => 'image/png']);
+        $client = $backend->makeClient();
+        $media = $client->messages->media('s', 'c1', 'm1');
+        $call = $backend->lastCall();
+        $this->assertSame('GET', $call['method']);
+        $this->assertSame('/api/sessions/s/messages/c1/m1/media', $call['path']);
+        $this->assertSame('PNG_BYTES', $media['data']);
+        $this->assertSame('image/png', $media['contentType']);
     }
 
     public function testStatusMediaReturnsStoredBytes(): void

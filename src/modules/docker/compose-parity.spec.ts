@@ -235,6 +235,101 @@ describe('DockerService managed specs ↔ docker-compose.yml parity', () => {
     expect(cfg.Env).toBeUndefined();
   });
 
+  // docker-compose.yml has NO env_file — the `environment:` list is an explicit allow-list, so a
+  // variable missing from it never reaches the container and the feature it gates stays silently
+  // off however the operator's .env is written. Exactly how AUTO_START_SESSIONS was inert before
+  // v0.12.0, and how SEND_PACING_* / MEDIA_CONVERSION_* shipped inert alongside CHAT_MEDIA_*.
+  const apiForwards = (): Set<string> => {
+    const api = (compose.services as Record<string, { environment?: string[] }>)['openwa-api'];
+    return new Set((api.environment ?? []).map(line => line.split('=')[0]));
+  };
+
+  it.each([
+    ['CHAT_MEDIA_*', 'config/configuration.ts', /CHAT_MEDIA_[A-Z_]+/g],
+    ['MEDIA_CONVERSION_*/FFMPEG_PATH', 'config/configuration.ts', /MEDIA_CONVERSION_[A-Z_]+|FFMPEG_PATH/g],
+    ['SEND_PACING_*', 'modules/message/send-pacing.config.ts', /SEND_PACING_[A-Z_]+/g],
+  ])('forwards every %s variable the app reads to the api container', (_family, sourcePath, pattern) => {
+    // Derived from the reading source file rather than hardcoded, so a new flag cannot be added to
+    // the app and forgotten here.
+    const src = readFileSync(join(__dirname, '..', '..', sourcePath), 'utf8');
+    const read = [...new Set(src.match(pattern) ?? [])];
+    expect(read.length).toBeGreaterThan(0);
+    const forwarded = apiForwards();
+    expect(read.filter(name => !forwarded.has(name))).toEqual([]);
+  });
+
+  // The family test above only covers three prefixes, so a boolean flag outside them could be added
+  // to the app and never forwarded — setting it in .env then does nothing under compose, silently.
+  // env-precedence.spec.ts cannot catch it either: that suite derives its expectations FROM the
+  // compose files, so it is structurally blind to a flag compose omits. This is the code -> compose
+  // direction, derived from env.validation.ts's checkBool list, which already enumerates every flag
+  // read with a bare `=== 'true'` / `!== 'false'` and carries a written rationale per key.
+  it('forwards every strict boolean flag, or names it in the not-forwarded allowlist', () => {
+    // Deliberately NOT forwarded. Each entry states why, so adding a key here is a decision rather
+    // than an omission.
+    const NOT_FORWARDED: Record<string, string> = {
+      // Owned by the dashboard's Infrastructure page, which writes data/.env.generated on the mounted
+      // volume — that file IS read inside the container, so these are settable, just not via .env.
+      POSTGRES_BUILTIN: 'dashboard-managed',
+      REDIS_BUILTIN: 'dashboard-managed',
+      MINIO_BUILTIN: 'dashboard-managed',
+      DATABASE_SSL: 'dashboard-managed',
+      DATABASE_SSL_REJECT_UNAUTHORIZED: 'dashboard-managed',
+      QUEUE_ENABLED: 'dashboard-managed',
+      // A typo or an absent value leaves these at the SECURE / documented-default state, so not
+      // forwarding them cannot degrade a deployment.
+      WEBHOOK_SSRF_PROTECT: 'fails safe (default on)',
+      ALLOW_DEV_API_KEY: 'refused outright in production',
+      // MCP_READONLY is deliberately absent: env.validation.ts leaves it out of the strict list on
+      // purpose (mcp.server.spec.ts asserts 'yes' keeps read-only on), so it is not in scope here.
+    };
+
+    const src = readFileSync(join(__dirname, '..', '..', 'config/env.validation.ts'), 'utf8');
+    // `[^\]]` rather than `[\s\S]*?`: env.validation.ts has an earlier `for (const key of [...])`
+    // for the numeric keys, and a lazy any-char match starts at THAT bracket and runs through it to
+    // the checkBool loop's closing one, silently merging both arrays.
+    const block = src.match(/for \(const key of \[([^\]]*?)\]\) \{\s*\n\s*checkBool\(key\);/);
+    expect(block).not.toBeNull();
+    const strictBooleans = [
+      ...new Set([...(block as RegExpMatchArray)[1].matchAll(/'([A-Z][A-Z_0-9]+)'/g)].map(m => m[1])),
+    ];
+    // Guard against a pattern that silently stops matching: an empty list would make this test vacuous.
+    expect(strictBooleans.length).toBeGreaterThan(20);
+
+    const forwarded = apiForwards();
+    const missing = strictBooleans.filter(name => !forwarded.has(name) && !(name in NOT_FORWARDED));
+    expect(missing).toEqual([]);
+
+    // Keep the allowlist honest in the other direction too: an entry that IS forwarded, or that is
+    // no longer a strict boolean, is stale and should be deleted.
+    const staleAllowlist = Object.keys(NOT_FORWARDED).filter(
+      name => forwarded.has(name) || !strictBooleans.includes(name),
+    );
+    expect(staleAllowlist).toEqual([]);
+  });
+
+  it('forwards the session-ownership keys multi-node deployments set (.env.example "Session ownership")', () => {
+    const forwarded = apiForwards();
+    const keys = [
+      'NODE_ID',
+      'NODE_URL',
+      'SESSION_LEASE_TTL_MS',
+      'SESSION_LEASE_HEARTBEAT_MS',
+      'SESSION_TAKEOVER_SWEEP_MS',
+      'SESSION_PROXY_TIMEOUT_MS',
+    ];
+    expect(keys.filter(name => !forwarded.has(name))).toEqual([]);
+  });
+
+  it('redis: sets the noeviction maxmemory policy BullMQ requires, on both launch paths', async () => {
+    const cfg = await capture('redis');
+    // The parity assertion above only proves the two launch paths AGREE — dropping the flag from
+    // both would keep it green. BullMQ needs noeviction: under any other policy Redis may evict
+    // queue keys once maxmemory is reached, losing queued jobs with no error surfaced anywhere.
+    expect(compose.services.redis.command).toContain('--maxmemory-policy noeviction');
+    expect(cfg.Cmd).toEqual(expect.arrayContaining(['--maxmemory-policy', 'noeviction']));
+  });
+
   it('redis: publishes no host ports, like compose', async () => {
     const cfg = await capture('redis');
     expect(compose.services.redis.ports).toBeUndefined();

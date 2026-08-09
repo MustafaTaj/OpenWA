@@ -20,10 +20,37 @@ class SessionsResource
         $this->http = $http;
     }
 
-    /** @return array<int,array<string,mixed>> */
-    public function list(): array
+    /**
+     * @param array<string,mixed> $query Optional pagination: `limit`, `offset`.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    public function list(array $query = []): array
     {
-        return $this->http->request('GET', '/api/sessions') ?? [];
+        return $this->http->request('GET', '/api/sessions', $query) ?? [];
+    }
+
+    /**
+     * Read a session's effective configuration.
+     *
+     * @return array<string,mixed>
+     */
+    public function getConfig(string $id): array
+    {
+        return $this->http->request('GET', "/api/sessions/{$this->http->encodeSegment($id)}/config");
+    }
+
+    /**
+     * Update a RUNNING session's configuration — no re-link and no QR scan. All three fields were
+     * fixed at creation before this route existed.
+     *
+     * @param array<string,mixed> $body autoRejectCalls, maxReconnectAttempts, reconnectBaseDelay
+     *
+     * @return array<string,mixed>
+     */
+    public function updateConfig(string $id, array $body): array
+    {
+        return $this->http->request('PATCH', "/api/sessions/{$this->http->encodeSegment($id)}/config", [], $body);
     }
 
     /** @return array<string,mixed> */
@@ -56,6 +83,25 @@ class SessionsResource
     public function stop(string $id): array
     {
         return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/stop");
+    }
+
+    /**
+     * Attempt an engine-native unlink of this device, then stop the session. A 200 means the
+     * unlink operation AND the required local credential cleanup completed — it is not an
+     * independent observation that the handset UI no longer shows the linked device. Because a
+     * completed unlink wipes the stored credentials, a later start() requires a fresh QR scan or
+     * pairing code. Requires a running session. Throws on HTTP 502 with
+     * `code: 'SESSION_LOGOUT_INCOMPLETE'` when the session was stopped locally but the logout
+     * operation did not complete (no send, no acknowledgement, timeout/transport error, or local
+     * cleanup failure); `phone` is cleared and no success audit is written. Start the session
+     * again and retry the logout; do not assume the retry reconnects automatically or lands in a
+     * guaranteed QR state.
+     *
+     * @return array<string,mixed>
+     */
+    public function logout(string $id): array
+    {
+        return $this->http->request('POST', "/api/sessions/{$this->http->encodeSegment($id)}/logout");
     }
 
     /** @return array<string,mixed> */

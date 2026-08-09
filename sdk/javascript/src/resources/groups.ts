@@ -10,11 +10,14 @@ import type { OpenWAClient } from '../client.js';
 import type {
   CreateGroupRequest,
   GroupInfo,
+  GroupJoinInfo,
   GroupSettingsResponse,
   GroupSummary,
   InviteCodeResponse,
+  SetGroupPictureRequest,
   JoinGroupRequest,
   JoinGroupResponse,
+  ParticipantsResult,
   SuccessResult,
   UpdateGroupSettingsRequest,
 } from '../types.js';
@@ -44,12 +47,32 @@ export class GroupsResource {
     });
   }
 
-  /** Create a new group. */
-  create(sessionId: string, body: CreateGroupRequest): Promise<GroupInfo> {
-    return this.client.request<GroupInfo>({
+  /**
+   * Create a new group.
+   *
+   * Answers the group SUMMARY, not the detail shape `get()` returns — there is no participant list,
+   * description, owner or creation time on a create response.
+   */
+  create(sessionId: string, body: CreateGroupRequest): Promise<GroupSummary> {
+    return this.client.request<GroupSummary>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups`,
       body,
+    });
+  }
+
+  /**
+   * Preview a group from its invite code, WITHOUT joining. Read-only, so it is safe to call on a
+   * code from an untrusted source.
+   *
+   * There is no participant list — the account is not a member — only a count, and only when
+   * WhatsApp discloses one. Fields the engine did not report are absent rather than zeroed.
+   */
+  joinInfo(sessionId: string, code: string): Promise<GroupJoinInfo> {
+    return this.client.request<GroupJoinInfo>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(sessionId)}/groups/join-info`,
+      query: { code },
     });
   }
 
@@ -63,8 +86,8 @@ export class GroupsResource {
   }
 
   /** Add participants to a group. */
-  addParticipants(sessionId: string, groupId: string, participants: string[]): Promise<SuccessResult> {
-    return this.client.request<SuccessResult>({
+  addParticipants(sessionId: string, groupId: string, participants: string[]): Promise<ParticipantsResult> {
+    return this.client.request<ParticipantsResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/participants`,
       body: { participants },
@@ -72,8 +95,8 @@ export class GroupsResource {
   }
 
   /** Remove participants from a group. */
-  removeParticipants(sessionId: string, groupId: string, participants: string[]): Promise<SuccessResult> {
-    return this.client.request<SuccessResult>({
+  removeParticipants(sessionId: string, groupId: string, participants: string[]): Promise<ParticipantsResult> {
+    return this.client.request<ParticipantsResult>({
       method: 'DELETE',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/participants`,
       body: { participants },
@@ -81,8 +104,8 @@ export class GroupsResource {
   }
 
   /** Promote participants to group admin. */
-  promoteParticipants(sessionId: string, groupId: string, participants: string[]): Promise<SuccessResult> {
-    return this.client.request<SuccessResult>({
+  promoteParticipants(sessionId: string, groupId: string, participants: string[]): Promise<ParticipantsResult> {
+    return this.client.request<ParticipantsResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/participants/promote`,
       body: { participants },
@@ -90,8 +113,8 @@ export class GroupsResource {
   }
 
   /** Demote participants from group admin. */
-  demoteParticipants(sessionId: string, groupId: string, participants: string[]): Promise<SuccessResult> {
-    return this.client.request<SuccessResult>({
+  demoteParticipants(sessionId: string, groupId: string, participants: string[]): Promise<ParticipantsResult> {
+    return this.client.request<ParticipantsResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/participants/demote`,
       body: { participants },
@@ -141,6 +164,31 @@ export class GroupsResource {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/leave`,
+    });
+  }
+
+  /** Get the group's picture URL (null when it has none). */
+  getPicture(sessionId: string, groupId: string): Promise<{ url: string | null }> {
+    return this.client.request<{ url: string | null }>({
+      method: 'GET',
+      path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/picture`,
+    });
+  }
+
+  /** Set the group's picture. Requires admin rights on the group. */
+  setPicture(sessionId: string, groupId: string, body: SetGroupPictureRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'PUT',
+      path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/picture`,
+      body,
+    });
+  }
+
+  /** Remove the group's picture. Requires admin rights on the group. */
+  deletePicture(sessionId: string, groupId: string): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'DELETE',
+      path: `/api/sessions/${encodeSegment(sessionId)}/groups/${encodeSegment(groupId)}/picture`,
     });
   }
 

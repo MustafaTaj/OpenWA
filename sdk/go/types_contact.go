@@ -3,13 +3,17 @@ package openwa
 import "net/url"
 
 // ContactRecord is a contact.
+//
+// IsBlocked is best-effort: the Baileys adapter does not track blocklist state and always reports
+// false.
 type ContactRecord struct {
-	ID          string  `json:"id"`
-	Name        *string `json:"name,omitempty"`
-	Number      *string `json:"number,omitempty"`
-	Pushname    *string `json:"pushname,omitempty"`
-	IsBusiness  bool    `json:"isBusiness,omitempty"`
-	IsMyContact bool    `json:"isMyContact,omitempty"`
+	ID            string  `json:"id"`
+	Name          *string `json:"name,omitempty"`
+	Number        *string `json:"number,omitempty"`
+	PushName      *string `json:"pushName,omitempty"`
+	IsMyContact   bool    `json:"isMyContact,omitempty"`
+	IsBlocked     bool    `json:"isBlocked,omitempty"`
+	ProfilePicURL *string `json:"profilePicUrl,omitempty"`
 }
 
 // CheckNumberResponse reports whether a number is on WhatsApp.
@@ -47,4 +51,11 @@ func (q *ListContactsQuery) values() url.Values {
 	setInt(v, "limit", q.Limit)
 	setInt(v, "offset", q.Offset)
 	return v
+}
+
+// UpsertContactRequest saves or edits an addressbook contact. LastName may be
+// empty for a single-name contact.
+type UpsertContactRequest struct {
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName,omitempty"`
 }

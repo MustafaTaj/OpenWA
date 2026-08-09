@@ -861,6 +861,25 @@ func TestUpdateGroupSettingsOmitsUnsetFields(t *testing.T) {
 	}
 }
 
+// A 503 is the gateway's answer when the engine never confirmed an operation — a transport failure,
+// and the one sentinel here worth retrying. It used to have none, while the permanent 501 did.
+func TestServiceUnavailableIsRetryableSentinel(t *testing.T) {
+	rt := &recordTransport{
+		status: 503,
+		body:   `{"statusCode":503,"message":"WhatsApp did not answer in time","error":"Service Unavailable"}`,
+	}
+	c := newTestClient(t, rt)
+
+	_, err := c.Groups.Get(context.Background(), "s1", "g1")
+	if !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("errors.Is ErrServiceUnavailable = false for %v", err)
+	}
+	// It must not also satisfy a sentinel that would mislead a caller into NOT retrying.
+	if errors.Is(err, ErrNotImplemented) {
+		t.Fatal("a 503 must not match ErrNotImplemented")
+	}
+}
+
 // Setting ephemeralSeconds on the whatsapp-web.js engine surfaces as 501.
 func TestUpdateGroupSettingsNotImplemented(t *testing.T) {
 	rt := &recordTransport{
@@ -989,6 +1008,11 @@ func TestWebhookEventWireValues(t *testing.T) {
 		EventSessionAuthenticated: "session.authenticated",
 		EventSessionDisconnected:  "session.disconnected",
 		EventSessionReconnectLoop: "session.reconnect_loop",
+		EventSessionRestriction:   "session.restriction",
+		EventPresenceUpdate:       "presence.update",
+		EventCallAccepted:         "call.accepted",
+		EventCallRejected:         "call.rejected",
+		EventCallMissed:           "call.missed",
 		EventGroupJoin:            "group.join",
 		EventGroupLeave:           "group.leave",
 		EventGroupUpdate:          "group.update",
@@ -1271,5 +1295,86 @@ func TestWebhookFiltersPolymorphicWireShape(t *testing.T) {
 	}
 	if _, present := first["caseSensitive"]; present {
 		t.Fatal("caseSensitive should be omitted when unset")
+	}
+}
+
+func TestMediaConversionStatus(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{"available":true}`}
+	c := newTestClient(t, rt)
+
+	res, err := c.Media.ConversionStatus(context.Background(), "s1")
+	if err != nil {
+		t.Fatalf("ConversionStatus: %v", err)
+	}
+	if !res.Available {
+		t.Fatalf("unexpected response: %+v", res)
+	}
+	if got, want := rt.lastReq.URL.Path, "/api/sessions/s1/media/convert"; got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+	if rt.lastReq.Method != "GET" {
+		t.Fatalf("method = %q, want GET", rt.lastReq.Method)
+	}
+}
+
+func TestConvertVoice(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{"base64":"T2dnUw==","mimetype":"audio/ogg; codecs=opus","bytes":8}`}
+	c := newTestClient(t, rt)
+
+	res, err := c.Media.ConvertVoice(context.Background(), "s1", ConvertMediaInput{Base64: "SUQz"})
+	if err != nil {
+		t.Fatalf("ConvertVoice: %v", err)
+	}
+	if res.Mimetype != "audio/ogg; codecs=opus" || res.Bytes != 8 {
+		t.Fatalf("unexpected response: %+v", res)
+	}
+	if got, want := rt.lastReq.URL.Path, "/api/sessions/s1/media/convert/voice"; got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+
+	// An unset URL must be omitted rather than sent as an empty string, which the
+	// server would read as a supplied-but-blank field.
+	if got := string(rt.lastRaw); got != `{"base64":"SUQz"}` {
+		t.Fatalf("body = %s, want {\"base64\":\"SUQz\"}", got)
+	}
+}
+
+func TestConvertVideo(t *testing.T) {
+	rt := &recordTransport{status: 200, body: `{"base64":"AAAA","mimetype":"video/mp4","bytes":4}`}
+	c := newTestClient(t, rt)
+
+	if _, err := c.Media.ConvertVideo(context.Background(), "s1", ConvertMediaInput{URL: "https://example.com/c.mov"}); err != nil {
+		t.Fatalf("ConvertVideo: %v", err)
+	}
+	if got, want := rt.lastReq.URL.Path, "/api/sessions/s1/media/convert/video"; got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+	if got := string(rt.lastRaw); got != `{"url":"https://example.com/c.mov"}` {
+		t.Fatalf("body = %s, want the url only", got)
+	}
+}
+
+// The config route needs three states per field: absent leaves it unchanged, explicit null clears it
+// to the default, a value sets it. A *int with omitempty could only ever express two — a nil pointer
+// was OMITTED, so restoring unlimited reconnect attempts was unreachable through this SDK.
+func TestUpdateSessionConfigEmitsThreeStates(t *testing.T) {
+	cases := []struct {
+		name string
+		req  UpdateSessionConfigRequest
+		want string
+	}{
+		{"absent leaves everything unchanged", UpdateSessionConfigRequest{}, `{}`},
+		{"a value sets it", UpdateSessionConfigRequest{MaxReconnectAttempts: Ptr(5)}, `{"maxReconnectAttempts":5}`},
+		{"clear sends explicit null", UpdateSessionConfigRequest{ClearMaxReconnectAttempts: true}, `{"maxReconnectAttempts":null}`},
+		{"clear wins over a value", UpdateSessionConfigRequest{MaxReconnectAttempts: Ptr(5), ClearMaxReconnectAttempts: true}, `{"maxReconnectAttempts":null}`},
+	}
+	for _, c := range cases {
+		b, err := json.Marshal(c.req)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if string(b) != c.want {
+			t.Fatalf("%s: got %s, want %s", c.name, b, c.want)
+		}
 	}
 }

@@ -228,6 +228,7 @@
     "qr_ready": "QR 스캔",
     "ready": "연결됨",
     "disconnected": "연결 끊김",
+    "action_required": "조치 필요",
     "failed": "실패",
     "authenticating": "인증하는 중..."
   },
@@ -289,13 +290,16 @@
       "phone": "전화번호",
       "phoneNone": "연결되지 않음",
       "created": "생성일",
-      "lastActive": "마지막 활동"
+      "lastActive": "마지막 활동",
+      "autoRejectCalls": "통화 자동 거절",
+      "autoRejectCallsHint": "수신 통화가 울리는 즉시 거절됩니다. call.received 웹훅은 그전에 그대로 전송됩니다. 다음 통화부터 적용되며 재시작이 필요하지 않습니다."
     },
     "actions": {
       "view": "보기",
       "start": "시작",
       "stop": "중지",
       "reconnect": "재연결",
+      "unlink": "연결 해제",
       "delete": "삭제",
       "killStuck": "강제 종료"
     },
@@ -304,6 +308,8 @@
       "readyDesc": "WhatsApp 세션이 연결되었습니다",
       "disconnectedTitle": "세션 연결 끊김",
       "disconnectedDesc": "WhatsApp 세션 연결이 끊어졌습니다",
+      "actionRequiredTitle": "조치 필요",
+      "actionRequiredDesc": "이 세션에 주의가 필요합니다. 할 일을 확인하려면 세션을 여세요.",
       "failedTitle": "세션 실패",
       "failedDesc": "WhatsApp 세션을 시작하지 못했습니다. 세션을 열어 원인을 확인하세요."
     },
@@ -311,7 +317,8 @@
       "phone": "전화번호",
       "sessionId": "세션 ID",
       "lastActive": "마지막 활동",
-      "error": "오류"
+      "error": "오류",
+      "restriction": "제한"
     },
     "forceKill": {
       "title": "멈춘 세션 강제 종료",
@@ -322,6 +329,18 @@
       "success": "세션이 강제로 종료되었습니다. 지금 다시 시작할 수 있습니다.",
       "failedTitle": "강제 종료 실패",
       "failed": "세션을 강제로 종료하지 못했습니다."
+    },
+    "unlink": {
+      "title": "기기 연결 해제",
+      "message": "세션 <strong>\"{{name}}\"</strong>을(를) WhatsApp 계정에서 연결 해제할까요?",
+      "warning": "WhatsApp이 이 기기를 계정의 연결된 기기 목록에서 제거하고 세션이 중지됩니다. 다시 연결하려면 새 QR 스캔 또는 페어링 코드가 필요합니다. 로컬 데이터까지 모두 지우려면 이후 세션을 삭제하세요.",
+      "confirm": "연결 해제",
+      "successTitle": "기기 연결 해제됨",
+      "success": "연결 해제 완료: 기기가 로그아웃되고 로컬 세션 자격 증명이 삭제되었습니다. 다시 연결하려면 새로운 QR 스캔 또는 페어링 코드가 필요합니다.",
+      "failedTitle": "연결 해제 실패",
+      "failed": "세션 연결 해제에 실패했습니다.",
+      "incompleteTitle": "연결 해제 미완료",
+      "incomplete": "세션이 로컬에서 중지되었지만 로그아웃 작업이 완료되지 않았습니다. 기기가 여전히 연결되어 있을 수 있습니다. 세션을 시작하고 연결 해제를 다시 시도하세요."
     },
     "pairing": {
       "tabQr": "QR 코드",
@@ -340,6 +359,16 @@
       "step3": "<strong>3.</strong> <strong>기기 연결</strong>을 누른 다음 <strong>전화번호로 연결하기</strong>를 누르세요",
       "step4": "<strong>4.</strong> 위에 표시된 8자리 코드를 휴대폰에 입력하세요",
       "waitingConnection": "휴대폰이 연결되기를 기다리는 중…"
+    },
+    "start": {
+      "teardownPendingTitle": "세션 시작 중",
+      "teardownPending": "이 세션의 자격 증명 해체가 아직 진행 중입니다. 잠시 기다린 후 다시 시도하세요."
+    },
+    "restriction": {
+      "reachout_timelock": "새 대화 차단됨",
+      "tos_block": "WhatsApp에 의해 차단됨",
+      "proxy_block": "연결 차단됨",
+      "until": "{{date}}까지"
     }
   },
   "webhooks": {
@@ -721,7 +750,8 @@
       "disconnected": "연결 끊김",
       "disabled": "사용 안 함"
     },
-    "envPinNote": "환경 변수로 고정됨 — 현재 실행 중인 값이며, 해당 변수를 해제해야 대시보드 변경 사항이 적용됩니다.",
+    "envPinNote": "환경 변수 {{name}}(으)로 고정됨 — 현재 실행 중인 값이며, 해당 변수를 해제해야 대시보드 변경 사항이 적용됩니다.",
+    "pendingRestartNote": "저장되었지만 아직 적용되지 않았습니다 — 이 변경 사항을 적용하려면 서버를 다시 시작하세요.",
     "migration": {
       "title": "주의 — 데이터 백엔드가 변경됩니다",
       "dbWarning": "새 데이터베이스는 비어 있는 상태로 시작됩니다. 지금(기존 데이터베이스에 있는 동안) 현재 데이터를 백업한 후 재시작이 끝나면 복원하세요.",
@@ -732,6 +762,8 @@
       "export": "데이터 내보내기",
       "import": "데이터 가져오기",
       "exportFailed": "데이터를 내보내지 못했습니다",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "데이터를 가져오지 못했습니다",
       "importOk": "데이터를 가져왔습니다",
       "importConfirm": "가져오기를 실행하면 현재 데이터가 백업본({{rows}}행)으로 완전히 대체됩니다. 되돌릴 수 없습니다. 계속할까요?",

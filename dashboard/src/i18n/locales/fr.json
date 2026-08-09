@@ -228,6 +228,7 @@
     "qr_ready": "Scanner le QR",
     "ready": "Connecté",
     "disconnected": "Déconnecté",
+    "action_required": "Action requise",
     "failed": "Échec",
     "authenticating": "Authentification..."
   },
@@ -289,13 +290,16 @@
       "phone": "Numéro de téléphone",
       "phoneNone": "Non connecté",
       "created": "Créé le",
-      "lastActive": "Dernière activité"
+      "lastActive": "Dernière activité",
+      "autoRejectCalls": "Rejeter automatiquement les appels",
+      "autoRejectCallsHint": "Les appels entrants sont refusés dès qu'ils sonnent. Le webhook call.received est tout de même émis avant. S'applique au prochain appel — aucun redémarrage nécessaire."
     },
     "actions": {
       "view": "Voir",
       "start": "Démarrer",
       "stop": "Arrêter",
       "reconnect": "Reconnecter",
+      "unlink": "Dissocier",
       "delete": "Supprimer",
       "killStuck": "Arrêter (bloquée)"
     },
@@ -304,6 +308,8 @@
       "readyDesc": "La session WhatsApp est maintenant connectée",
       "disconnectedTitle": "Session déconnectée",
       "disconnectedDesc": "La session WhatsApp a été déconnectée",
+      "actionRequiredTitle": "Action requise",
+      "actionRequiredDesc": "Cette session nécessite votre attention. Ouvrez la session pour voir quoi faire.",
       "failedTitle": "Échec de la session",
       "failedDesc": "Le démarrage de la session WhatsApp a échoué. Ouvrez la session pour en voir la raison."
     },
@@ -311,7 +317,8 @@
       "phone": "Téléphone",
       "sessionId": "ID de session",
       "lastActive": "Dernière activité",
-      "error": "Erreur"
+      "error": "Erreur",
+      "restriction": "Restriction"
     },
     "forceKill": {
       "title": "Arrêter la session bloquée",
@@ -322,6 +329,18 @@
       "success": "L'arrêt forcé de la session a réussi. Vous pouvez la redémarrer maintenant.",
       "failedTitle": "Échec de l'arrêt forcé",
       "failed": "Échec de l'arrêt forcé de la session."
+    },
+    "unlink": {
+      "title": "Dissocier l'appareil",
+      "message": "Dissocier la session <strong>\"{{name}}\"</strong> du compte WhatsApp ?",
+      "warning": "WhatsApp retire cet appareil des Appareils associés du compte et la session s'arrête. La reconnexion nécessite un nouveau scan QR ou un code d'appairage. Pour effacer aussi toutes les données locales, supprimez ensuite la session.",
+      "confirm": "Dissocier",
+      "successTitle": "Appareil dissocié",
+      "success": "Dissociation terminée : l'appareil a été déconnecté et les identifiants de session locaux ont été effacés. Reconnecter nécessite un nouveau QR code ou code d'association.",
+      "failedTitle": "Échec de la dissociation",
+      "failed": "Impossible de dissocier la session.",
+      "incompleteTitle": "Dissociation incomplète",
+      "incomplete": "La session s'est arrêtée localement, mais l'opération de déconnexion est incomplète — l'appareil peut encore être associé. Démarrez la session et relancez la dissociation."
     },
     "pairing": {
       "tabQr": "Code QR",
@@ -340,6 +359,16 @@
       "step3": "<strong>3.</strong> Appuyez sur <strong>Connecter un appareil</strong>, puis sur <strong>Lier avec un numéro de téléphone</strong>",
       "step4": "<strong>4.</strong> Saisissez sur votre téléphone le code à 8 caractères affiché ci-dessus",
       "waitingConnection": "En attente de la liaison de votre téléphone…"
+    },
+    "start": {
+      "teardownPendingTitle": "Démarrage de la session",
+      "teardownPending": "Un nettoyage d'identifiants pour cette session est encore en cours. Patientez un instant et réessayez."
+    },
+    "restriction": {
+      "reachout_timelock": "Nouvelles discussions bloquées",
+      "tos_block": "Bloqué par WhatsApp",
+      "proxy_block": "Connexion bloquée",
+      "until": "jusqu'au {{date}}"
     }
   },
   "webhooks": {
@@ -740,7 +769,8 @@
     "toasts": {
       "saveFailed": "Échec de l'enregistrement"
     },
-    "envPinNote": "Défini par une variable d'environnement — c'est la valeur en cours d'exécution ; les modifications du tableau de bord ne s'appliqueront pas tant que cette variable ne sera pas supprimée.",
+    "envPinNote": "Défini par la variable d'environnement {{name}} — c'est la valeur en cours d'exécution ; les modifications du tableau de bord ne s'appliqueront pas tant que cette variable n'est pas supprimée.",
+    "pendingRestartNote": "Enregistré, mais pas encore appliqué — redémarrez le serveur pour que cette modification prenne effet.",
     "migration": {
       "title": "Attention — cela change le backend de données",
       "dbWarning": "La nouvelle base de données démarre vide. Téléchargez dès maintenant une sauvegarde de vos données actuelles (tant que vous êtes encore sur l'ancienne base de données), puis restaurez-la après le redémarrage.",
@@ -751,6 +781,8 @@
       "export": "Exporter les données",
       "import": "Importer les données",
       "exportFailed": "Impossible d'exporter les données",
+      "exportPartialTitle": "Backup is missing some media",
+      "exportPartial": "{{count}} attachment payload(s) exceeded the export media budget and were saved as placeholders. The messages restore; their media does not.",
       "importFailed": "Impossible d'importer les données",
       "importOk": "Données importées",
       "importConfirm": "L'importation REMPLACERA toutes les données actuelles par la sauvegarde ({{rows}} lignes). Cette action est irréversible. Continuer ?",

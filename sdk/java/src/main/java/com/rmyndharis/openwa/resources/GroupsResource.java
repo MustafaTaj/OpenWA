@@ -7,14 +7,18 @@ import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.CreateGroupRequest;
 import com.rmyndharis.openwa.model.GroupDescriptionRequest;
 import com.rmyndharis.openwa.model.GroupInfo;
+import com.rmyndharis.openwa.model.GroupJoinInfo;
 import com.rmyndharis.openwa.model.GroupSettings;
 import com.rmyndharis.openwa.model.GroupSubjectRequest;
 import com.rmyndharis.openwa.model.GroupSummary;
+import com.rmyndharis.openwa.model.GroupPictureResponse;
 import com.rmyndharis.openwa.model.InviteCodeResponse;
+import com.rmyndharis.openwa.model.SetGroupPictureRequest;
 import com.rmyndharis.openwa.model.JoinGroupRequest;
 import com.rmyndharis.openwa.model.JoinGroupResponse;
 import com.rmyndharis.openwa.model.ListGroupsQuery;
 import com.rmyndharis.openwa.model.ParticipantsRequest;
+import com.rmyndharis.openwa.model.ParticipantsResult;
 import com.rmyndharis.openwa.model.SuccessResult;
 import java.util.List;
 
@@ -47,50 +51,53 @@ public final class GroupsResource {
             GroupInfo.class);
     }
 
-    /** Create a new group. */
-    public GroupInfo create(String sessionId, CreateGroupRequest body) {
+    /**
+     * Create a group. Answers the group SUMMARY, not the detail shape {@code get} returns — there is
+     * no participant list, description, owner or creation time on a create response.
+     */
+    public GroupSummary create(String sessionId, CreateGroupRequest body) {
         return client.request(
-            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/groups", null, body, GroupInfo.class);
+            HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/groups", null, body, GroupSummary.class);
     }
 
     /** Add participants to a group. */
-    public SuccessResult addParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult addParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Remove participants from a group. */
-    public SuccessResult removeParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult removeParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.DELETE,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Promote participants to group admin. */
-    public SuccessResult promoteParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult promoteParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants/promote",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Demote participants from group admin. */
-    public SuccessResult demoteParticipants(String sessionId, String groupId, List<String> participants) {
+    public ParticipantsResult demoteParticipants(String sessionId, String groupId, List<String> participants) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/participants/demote",
             null,
             new ParticipantsRequest(participants),
-            SuccessResult.class);
+            ParticipantsResult.class);
     }
 
     /** Update the group subject (name). */
@@ -101,6 +108,22 @@ public final class GroupsResource {
             null,
             new GroupSubjectRequest(subject),
             SuccessResult.class);
+    }
+
+    /**
+     * Preview a group from its invite code, WITHOUT joining. Read-only, so it is safe to call on a
+     * code from an untrusted source.
+     *
+     * <p>There is no participant list — the account is not a member — only a count, and only when
+     * WhatsApp discloses one.
+     */
+    public GroupJoinInfo joinInfo(String sessionId, String code) {
+        return client.request(
+            HttpMethod.GET,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/join-info",
+            java.util.Map.of("code", code),
+            null,
+            GroupJoinInfo.class);
     }
 
     /** Join a group via an invite code. Returns the joined group id. */
@@ -151,6 +174,36 @@ public final class GroupsResource {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/leave",
+            null,
+            null,
+            SuccessResult.class);
+    }
+
+    /** Get the group's picture URL (null when it has none). */
+    public GroupPictureResponse getPicture(String sessionId, String groupId) {
+        return client.request(
+            HttpMethod.GET,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/picture",
+            null,
+            null,
+            GroupPictureResponse.class);
+    }
+
+    /** Set the group's picture. Requires admin rights on the group. */
+    public SuccessResult setPicture(String sessionId, String groupId, SetGroupPictureRequest body) {
+        return client.request(
+            HttpMethod.PUT,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/picture",
+            null,
+            body,
+            SuccessResult.class);
+    }
+
+    /** Remove the group's picture. Requires admin rights on the group. */
+    public SuccessResult deletePicture(String sessionId, String groupId) {
+        return client.request(
+            HttpMethod.DELETE,
+            "/api/sessions/" + encodeSegment(sessionId) + "/groups/" + encodeSegment(groupId) + "/picture",
             null,
             null,
             SuccessResult.class);

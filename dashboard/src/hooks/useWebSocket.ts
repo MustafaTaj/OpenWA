@@ -37,7 +37,13 @@ interface MessageReactionEvent {
   chatId: string;
   reaction: string;
   senderId: string;
-  reactions: Record<string, string>;
+  /**
+   * The post-apply snapshot of every reaction on the message. ABSENT when the gateway holds no
+   * stored copy of the message to compute it from, which it says by omitting the key rather than
+   * sending an empty object — absent means "unknown", `{}` means "there are none left". Keep it
+   * optional: normalising the absence away here is what makes a consumer's own fallback dead code.
+   */
+  reactions?: Record<string, string>;
   timestamp: string;
 }
 
@@ -71,6 +77,12 @@ interface StatusReceivedEvent {
   timestamp: string;
 }
 
+/** A restriction imposed or lifted — the dashboard uses it purely as a refetch signal for the badge. */
+interface SessionRestrictionEvent {
+  sessionId: string;
+  timestamp: string;
+}
+
 /** Ack frame answering a client `subscribe` request (`{type: 'subscribed'}`). */
 interface SubscribedEvent {
   sessionId: string;
@@ -92,6 +104,7 @@ interface WebSocketEvents {
   onMessageRevoked?: (event: MessageRevokedEvent) => void;
   onMessageEdited?: (event: MessageEditedEvent) => void;
   onStatusReceived?: (event: StatusReceivedEvent) => void;
+  onSessionRestriction?: (event: SessionRestrictionEvent) => void;
   onSubscribed?: (event: SubscribedEvent) => void;
   onServerError?: (event: ServerErrorEvent) => void;
 }
@@ -133,8 +146,11 @@ warnIfInsecureHttpUrl(SOCKET_URL, 'VITE_WS_URL');
 export function useWebSocket(events: WebSocketEvents = {}) {
   const socketRef = useRef<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  // True once Socket.IO exhausts its reconnection attempts and permanently gives up — lets the
-  // UI show a "connection lost" indicator + a manual retry instead of silently going stale.
+  // True when the connection is dead until the user retries: Socket.IO either exhausted its
+  // reconnection attempts, or the server itself closed the socket (rate limit, auth rejection,
+  // key eviction — a server-initiated close sets skipReconnect, so no auto-reconnect runs and
+  // `reconnect_failed` never fires). Lets the UI show a "connection lost" indicator + a manual
+  // retry instead of silently going stale.
   const [connectionFailed, setConnectionFailed] = useState(false);
 
   const connect = useCallback(() => {
@@ -168,8 +184,16 @@ export function useWebSocket(events: WebSocketEvents = {}) {
       setConnectionFailed(false);
     });
 
-    socketRef.current.on('disconnect', () => {
+    socketRef.current.on('disconnect', reason => {
       setIsConnected(false);
+      // A server-initiated close (handshake rate limit, auth rejection, key eviction) sets
+      // Socket.IO's skipReconnect: no auto-reconnect runs, so `reconnect_failed` never fires
+      // and without this the tab would silently stop receiving events. Surface the same
+      // recoverable failure state — the banner's manual retry opens a fresh socket, which
+      // skipReconnect does not block.
+      if (reason === 'io server disconnect') {
+        setConnectionFailed(true);
+      }
     });
 
     socketRef.current.on('connect_error', error => {
@@ -261,6 +285,9 @@ export function useWebSocket(events: WebSocketEvents = {}) {
         case 'status.received':
           events.onStatusReceived?.({ sessionId, timestamp: msg.timestamp });
           break;
+        case 'session.restriction':
+          events.onSessionRestriction?.({ sessionId, timestamp: msg.timestamp });
+          break;
         case 'message.ack':
           events.onMessageAck?.({
             sessionId,
@@ -278,7 +305,9 @@ export function useWebSocket(events: WebSocketEvents = {}) {
             chatId: String(data.chatId),
             reaction: String(data.reaction),
             senderId: String(data.senderId),
-            reactions: (data.reactions as Record<string, string>) || {},
+            // Carried through as-is, including absent: `|| {}` here would tell every consumer that
+            // the message has no reactions left, which is a different claim from "we do not know".
+            reactions: data.reactions as Record<string, string> | undefined,
             timestamp: msg.timestamp,
           });
           break;

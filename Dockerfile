@@ -68,6 +68,13 @@ FROM docker.io/node:22-slim AS production
 ARG TARGETARCH
 # sqlite3 ships the CLI so an in-container scripts/backup.sh run takes online-consistent SQLite
 # snapshots (.backup) instead of plain-copying a live database (which can archive a torn file).
+#
+# ffmpeg backs the opt-in media-conversion endpoints, and also repairs an existing gap: whatsapp-web.js
+# requires fluent-ffmpeg at module load and calls it for video-to-webp animated stickers, so
+# sendSticker with a video mimetype has been failing in this image for want of the binary. Measured
+# cost with --no-install-recommends: ~210 MB, and no new fixable CRITICAL/HIGH findings under the
+# release image scan. It is the Debian package rather than a bundled static build precisely so that
+# codec CVEs arrive through the same security stream as everything else here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     $([ "$TARGETARCH" = arm64 ] && echo "chromium chromium-sandbox") \
     fonts-liberation \
@@ -93,6 +100,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     procps \
     sqlite3 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Puppeteer to skip automatic download during npm install (we download it explicitly below)
@@ -112,10 +120,29 @@ COPY package*.json ./
 # scripts/postinstall.js rides along: `npm ci` below runs the hook, which fails
 # when the file is missing. With the patcher present the hook applies it in
 # --best-effort mode; the explicit fatal run right after is the real gate.
-COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch ./scripts/
+COPY scripts/postinstall.js scripts/patch-wwebjs-201832.js scripts/wwebjs-201832.patch scripts/patch-wwebjs-newsletter-preview.js scripts/patch-wwebjs-status.js scripts/patch-wwebjs-ready-sync.js scripts/patch-baileys-appstate.js ./scripts/
 
-# Install production dependencies only, then apply the backport patcher (needs `patch`).
-RUN npm ci --omit=dev && node scripts/patch-wwebjs-201832.js && npm cache clean --force
+# Install production dependencies only, then apply the backports. The status patcher runs after
+# the two patchers it depends on: its transforms were written against the tree they leave behind.
+# scripts/dockerfile-patchers.spec.js derives this list from scripts/patch-*.js and fails if a
+# patcher is added without being copied AND run here — a hand-written list loses one silently, and
+# the Baileys one shipped in postinstall for a whole release without ever reaching the image.
+RUN npm ci --omit=dev \
+    && node scripts/patch-wwebjs-201832.js \
+    && node scripts/patch-wwebjs-newsletter-preview.js \
+    && node scripts/patch-wwebjs-status.js \
+    && node scripts/patch-wwebjs-ready-sync.js \
+    && node scripts/patch-baileys-appstate.js \
+    && npm cache clean --force
+
+# Replace the npm the base image bundles. npm is not on the request path — the entrypoint runs
+# `node dist/main` — but it stays in the image because the operator runbooks drive it
+# (`docker exec openwa npm run cli …`, `npm run export`), and its own bundled dependency tree is
+# what the release image scan reports. node:22-slim currently ships npm 10.9.8, whose bundle
+# carries a critical node-tar advisory plus sigstore/picomatch ones; npm 12 fixes all three.
+# Deliberately AFTER `npm ci`, so the application tree is still resolved by the npm the lockfile
+# was generated with and only the global CLI is swapped.
+RUN npm install -g npm@12 && npm cache clean --force
 
 # amd64: download Chrome for Testing via Puppeteer and symlink it.
 # arm64: use Debian's chromium installed above (CfT has no linux-arm64 build).
@@ -139,9 +166,13 @@ COPY --from=builder /app/dist ./dist
 # (app.module.ts resolves dashboard/dist relative to dist/). Single container, single port.
 COPY --from=builder /app/dashboard/dist ./dashboard/dist
 
-# Create data directories with correct ownership
-RUN mkdir -p ./data/sessions ./data/media && \
-    chown -R openwa:openwa /app
+# Create data directories with correct ownership. Only ./data is chowned, NOT all of /app: the app
+# tree (node_modules, dist) only needs read access, which root-owned files already grant, and the
+# entrypoint re-chowns /app/data at every container start for the mounted-volume case. A full
+# /app chown walks every production dependency file (issue #1045: ~35 minutes on a small VPS) and
+# duplicates their metadata into a new image layer.
+RUN mkdir -p ./data/sessions ./data/media ./data/plugins && \
+    chown -R openwa:openwa ./data
 
 # The non-root openwa user has no home of its own (`useradd -r`, no -m). Chromium resolves the home
 # dir from the passwd entry via glib's getpwuid() — it IGNORES $HOME — so it tries to read/write

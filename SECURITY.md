@@ -6,13 +6,13 @@ socket. Security matters here, and we appreciate responsible disclosure.
 
 ## Supported versions
 
-Security fixes land on the latest minor release (currently 0.10.x). Older minor
+Security fixes land on the latest minor release (currently 0.15.x). Older minor
 lines receive no backports — please upgrade older deployments.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.10.x  | :white_check_mark: |
-| < 0.10  | :x:                |
+| 0.15.x  | :white_check_mark: |
+| < 0.15  | :x:                |
 
 ## Reporting a vulnerability
 
@@ -71,9 +71,32 @@ it as one:
 
 Mitigations in place: the proxy is unreachable except from `openwa-api` (dedicated
 `internal: true` network), the orchestration endpoints require an ADMIN-role API key,
-teardown is allowlisted to the three managed profiles (`postgres`, `redis`, `minio`),
+both teardown and start are constrained to the three managed profiles (`postgres`,
+`redis`, `minio`) — non-managed names are dropped before reaching `DockerService` —
 and OpenWA itself never issues deletes (profile teardown is stop-only). If you do not
 use the built-in datastore orchestration (Dashboard → Infrastructure built-in
 toggles), disable the proxy entirely — see the `docker-proxy` comments in
 `docker-compose.yml`; `DockerService` then reports Docker unavailable and
 orchestration degrades gracefully.
+
+### Session-restricted API keys
+
+An API key can be restricted to a subset of sessions (`allowedSessions`). A key
+with a non-empty restriction is denied on every route that acts on the whole
+deployment rather than on a single session:
+
+- Infrastructure routes (`/api/infra/*`)
+- API-key lifecycle routes (`/api/auth/api-keys/*`)
+- Plugin installation and lifecycle (`/api/plugins/*` — per-session activation
+  and per-session config remain available, scoped to the sessions the key
+  allows)
+- Cross-session statistics (`GET /api/stats/overview`, `GET /api/stats/messages`)
+- Application settings (`GET` / `PUT /api/settings`)
+- Session creation (`POST /api/sessions`)
+- The queue dashboard (`/api/admin/queues`)
+
+Redriving a dead-lettered integration delivery also fails closed (`404`) when
+the instance sits outside the key's scope, so retained dead-letter rows cannot
+be re-dispatched across the boundary. Per-session routes for the sessions the
+key allows remain available, and keys without an `allowedSessions` restriction
+are unaffected.

@@ -30,7 +30,7 @@ import {
 } from '../hooks/queries';
 import { PageHeader } from '../components/PageHeader';
 import { Modal } from '../components/Modal';
-import { useToast } from '../components/Toast';
+import { useToast } from '../hooks/useToast';
 import { copyToClipboard } from '../utils/clipboard';
 import './ApiKeys.css';
 
@@ -383,7 +383,9 @@ export function ApiKeys() {
           </div>
           <p className="confirm-message">
             <Trans
-              i18nKey={confirmAction.type === 'delete' ? 'apiKeys.confirm.deleteMessage' : 'apiKeys.confirm.revokeMessage'}
+              i18nKey={
+                confirmAction.type === 'delete' ? 'apiKeys.confirm.deleteMessage' : 'apiKeys.confirm.revokeMessage'
+              }
               values={{ name: confirmAction.name }}
               components={{ strong: <strong /> }}
             />

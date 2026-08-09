@@ -1,15 +1,27 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { BadRequestException, NotFoundException, PayloadTooLargeException } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { Message, MessageDirection, MessageStatus } from './entities/message.entity';
 import { SessionService } from '../session/session.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
+import { MessageProjector } from '../session/message-projector.service';
+import type { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { HookManager } from '../../core/hooks';
 import { TemplateService } from '../template/template.service';
 import { Template } from '../template/entities/template.entity';
 import { SsrfBlockedError } from '../../common/security/ssrf-guard';
 import { LidMappingStoreService } from '../../engine/identity/lid-mapping-store.service';
+import { SendPacingService } from './send-pacing.service';
+
+/** Pacing is off by default in these tests; the governor's own spec covers its behaviour. */
+const inertPacing = (): SendPacingService =>
+  ({
+    assertSendAllowed: jest.fn().mockResolvedValue(undefined),
+    recordSendFailure: jest.fn(),
+    recordSendSuccess: jest.fn(),
+  }) as unknown as SendPacingService;
 
 const mockEngineResult = { id: 'wa-msg-1', timestamp: 1706868000 };
 
@@ -29,6 +41,10 @@ function createMockEngine() {
     reactToMessage: jest.fn().mockResolvedValue(undefined),
     getMessageReactions: jest.fn().mockResolvedValue([]),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
+    pinMessage: jest.fn().mockResolvedValue(undefined),
+    starMessage: jest.fn().mockResolvedValue(undefined),
+    votePoll: jest.fn().mockResolvedValue(undefined),
+    unpinMessage: jest.fn().mockResolvedValue(undefined),
     editMessage: jest.fn().mockResolvedValue(mockEngineResult),
     getChatHistory: jest.fn().mockResolvedValue([]),
     sendChatState: jest.fn().mockResolvedValue(undefined),
@@ -39,6 +55,8 @@ describe('MessageService', () => {
   let service: MessageService;
   let repository: jest.Mocked<Partial<Repository<Message>>>;
   let sessionService: jest.Mocked<Partial<SessionService>>;
+  let engines: EngineRegistry;
+  let messageProjector: { recordOutboundMessageEdit: jest.Mock };
   let hookManager: jest.Mocked<Partial<HookManager>>;
   let templateService: jest.Mocked<Partial<TemplateService>>;
   let lidMappingStore: { lidsForPhone: jest.Mock; getCached: jest.Mock };
@@ -67,10 +85,13 @@ describe('MessageService', () => {
     mockEngine = createMockEngine();
 
     sessionService = {
-      getEngine: jest.fn().mockReturnValue(mockEngine),
       findOne: jest.fn().mockResolvedValue({ id: 'sess-1', phone: '628123456789' }),
-      recordOutboundMessageEdit: jest.fn().mockResolvedValue(undefined),
     };
+
+    messageProjector = { recordOutboundMessageEdit: jest.fn().mockResolvedValue(undefined) };
+
+    engines = new EngineRegistry();
+    engines.set('sess-1', mockEngine as unknown as IWhatsAppEngine);
 
     hookManager = {
       // Echo the input straight back so the message:sending gate is a pass-through by default; specific
@@ -89,8 +110,18 @@ describe('MessageService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         MessageService,
+        {
+          provide: SendPacingService,
+          useValue: {
+            assertSendAllowed: jest.fn().mockResolvedValue(undefined),
+            recordSendFailure: jest.fn(),
+            recordSendSuccess: jest.fn(),
+          },
+        },
         { provide: getRepositoryToken(Message, 'data'), useValue: repository },
         { provide: SessionService, useValue: sessionService },
+        { provide: EngineRegistry, useValue: engines },
+        { provide: MessageProjector, useValue: messageProjector },
         { provide: HookManager, useValue: hookManager },
         { provide: TemplateService, useValue: templateService },
         { provide: LidMappingStoreService, useValue: lidMappingStore },
@@ -142,6 +173,69 @@ describe('MessageService', () => {
       expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('120@g.us', 'hi @62811', ['62811@c.us']);
     });
 
+    // The parameter is only guaranteed in its suppressing direction, so what matters is that `false`
+    // reaches the engine and that everything else leaves the existing call shape alone.
+    it('threads a link-preview suppression through to the engine', async () => {
+      const input = { chatId: '628123456789@c.us', text: 'see https://example.com', linkPreview: false };
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { sessionId: 'sess-1', input, type: 'text' },
+      });
+
+      await service.sendText('sess-1', input);
+
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith(
+        '628123456789@c.us',
+        'see https://example.com',
+        undefined,
+        { linkPreview: false },
+      );
+    });
+
+    // A send that asks for nothing must keep the exact call it made before this option existed —
+    // a trailing undefined would be harmless to the engines but would rewrite every existing send.
+    it('leaves the plain send shape untouched when no preview choice is made', async () => {
+      await service.sendText('sess-1', { chatId: '628123456789@c.us', text: 'hi' });
+
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith('628123456789@c.us', 'hi');
+    });
+
+    it('threads a caller-supplied preview through to the engine', async () => {
+      const input = {
+        chatId: '628123456789@c.us',
+        text: 'see https://example.com',
+        customLinkPreview: { url: 'https://example.com', title: 'Example', description: 'A site' },
+      };
+      (hookManager.execute as jest.Mock).mockResolvedValueOnce({
+        continue: true,
+        data: { sessionId: 'sess-1', input, type: 'text' },
+      });
+
+      await service.sendText('sess-1', input);
+
+      expect(mockEngine.sendTextMessage).toHaveBeenCalledWith(
+        '628123456789@c.us',
+        'see https://example.com',
+        undefined,
+        { customPreview: { url: 'https://example.com', title: 'Example', description: 'A site' } },
+      );
+    });
+
+    // Suppressing the preview and supplying one are opposite requests; guessing which was meant
+    // would send a message the caller did not ask for either way.
+    it('refuses a suppression combined with a supplied preview, before reaching the engine', async () => {
+      await expect(
+        service.sendText('sess-1', {
+          chatId: '628123456789@c.us',
+          text: 'hi',
+          linkPreview: false,
+          customLinkPreview: { url: 'https://example.com', title: 'Example' },
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(mockEngine.sendTextMessage).not.toHaveBeenCalled();
+    });
+
     it('should save outgoing message as pending before sending, then update to sent', async () => {
       await service.sendText('sess-1', {
         chatId: '628123456789@c.us',
@@ -187,7 +281,8 @@ describe('MessageService', () => {
         expect.objectContaining({ type: 'text' }),
         expect.any(Object),
       );
-      // message:sent is no longer fired here — it is emitted solely by SessionService.onMessageCreate
+      // message:sent is no longer fired here — it is emitted solely by the onMessageCreate wiring in
+      // SessionEngineLifecycle (via MessageProjector)
       // with a consistent IncomingMessage payload for ALL sends (avoids the prior double dispatch).
       expect(hookManager.execute).not.toHaveBeenCalledWith('message:sent', expect.anything(), expect.anything());
     });
@@ -268,7 +363,7 @@ describe('MessageService', () => {
     });
 
     it('should throw BadRequestException if session is not active', async () => {
-      (sessionService.getEngine as jest.Mock).mockReturnValue(undefined);
+      engines.delete('sess-1');
 
       await expect(service.sendText('inactive', { chatId: 'test@c.us', text: 'hello' })).rejects.toThrow(
         BadRequestException,
@@ -389,13 +484,16 @@ describe('MessageService', () => {
     it('honors a configured template.renderMaxChars override', async () => {
       const configService = {
         get: (key: string, fallback: unknown) => (key === 'template.renderMaxChars' ? 10 : fallback),
-      } as unknown as ConstructorParameters<typeof MessageService>[5];
+      } as unknown as ConstructorParameters<typeof MessageService>[8];
       const capped = new MessageService(
         repository as Repository<Message>,
         sessionService as unknown as SessionService,
+        engines,
+        messageProjector as unknown as MessageProjector,
         hookManager as HookManager,
         templateService as unknown as TemplateService,
         lidMappingStore as unknown as LidMappingStoreService,
+        inertPacing(),
         configService,
       );
       (templateService.resolve as jest.Mock).mockResolvedValue(mockTemplate({ body: 'Hello {{customer}}' }));
@@ -1090,6 +1188,20 @@ describe('MessageService', () => {
         }),
       );
     });
+
+    it('gates the forward against pacing by its destination chat', async () => {
+      // ForwardMessageDto has no `chatId` — the gate must fall back to `toChatId`, or forwards skip
+      // the cold-reachout rule entirely while their persisted row still drains the cold budget.
+      const { assertSendAllowed } = (service as unknown as { pacing: { assertSendAllowed: jest.Mock } }).pacing;
+
+      await service.forward('sess-1', {
+        fromChatId: 'from@c.us',
+        toChatId: 'to@c.us',
+        messageId: 'wa-msg-to-fwd',
+      });
+
+      expect(assertSendAllowed).toHaveBeenCalledWith('sess-1', 'to@c.us');
+    });
   });
 
   // ── saveIncomingMessage ───────────────────────────────────────────
@@ -1281,7 +1393,7 @@ describe('MessageService', () => {
       expect(mockEngine.editMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', 'edited');
       // Persistence is delegated to the session's per-message mutation queue (serialized with the
       // inbound edit path) — the service no longer writes the row directly.
-      expect(sessionService.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'edited');
+      expect(messageProjector.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'edited');
       expect(repository.update).not.toHaveBeenCalled();
       expect(res).toEqual({ messageId: 'wa-msg-1', timestamp: 1706868000 });
     });
@@ -1299,11 +1411,11 @@ describe('MessageService', () => {
       await expect(
         service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' }),
       ).rejects.toBeInstanceOf(NotFoundException);
-      expect(sessionService.recordOutboundMessageEdit).not.toHaveBeenCalled();
+      expect(messageProjector.recordOutboundMessageEdit).not.toHaveBeenCalled();
     });
 
     it('throws BadRequestException when the session is not started', async () => {
-      (sessionService.getEngine as jest.Mock).mockReturnValue(undefined);
+      engines.delete('sess-1');
       await expect(
         service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'edited' }),
       ).rejects.toBeInstanceOf(BadRequestException);
@@ -1330,7 +1442,7 @@ describe('MessageService', () => {
       ).rejects.toThrow('Message sending blocked by plugin');
 
       expect(mockEngine.editMessage).not.toHaveBeenCalled();
-      expect(sessionService.recordOutboundMessageEdit).not.toHaveBeenCalled();
+      expect(messageProjector.recordOutboundMessageEdit).not.toHaveBeenCalled();
     });
 
     it('threads a plugin-rewritten edit body through to the engine and the stored row', async () => {
@@ -1342,7 +1454,7 @@ describe('MessageService', () => {
       await service.editMessage('sess-1', { chatId: 'test@c.us', messageId: 'wa-msg-1', body: 'secret' });
 
       expect(mockEngine.editMessage).toHaveBeenCalledWith('test@c.us', 'wa-msg-1', 'redacted');
-      expect(sessionService.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'redacted');
+      expect(messageProjector.recordOutboundMessageEdit).toHaveBeenCalledWith('sess-1', 'wa-msg-1', 'redacted');
     });
   });
 
@@ -1370,12 +1482,87 @@ describe('MessageService', () => {
     });
   });
 
+  // The bulk path persists AFTER the send with the engine id already known, so it races the own-send
+  // echo on UNIQUE(sessionId, waMessageId). Losing that race used to drop the batch's media payload.
+  describe('saveOutgoingMessage vs the own-send echo (dedup race)', () => {
+    const uniqueViolation = new Error('UNIQUE constraint failed: messages.sessionId, messages.waMessageId');
+    const bulkRow = {
+      waMessageId: 'wa-bulk-1',
+      chatId: '621@c.us',
+      type: 'image',
+      status: MessageStatus.SENT,
+      timestamp: 1706868000,
+      metadata: { media: { mimetype: 'image/png', data: 'QUJD', filename: 'a.png' } },
+    };
+
+    it('merges the media payload onto the echo row instead of losing it', async () => {
+      (repository.save as jest.Mock).mockRejectedValueOnce(uniqueViolation);
+      (repository.findOne as jest.Mock).mockResolvedValueOnce({ id: 'echo-row', ...bulkRow });
+
+      const saved = await service.saveOutgoingMessage('sess-1', bulkRow);
+
+      expect(repository.update).toHaveBeenCalledWith(
+        { sessionId: 'sess-1', waMessageId: 'wa-bulk-1' },
+        expect.objectContaining({
+          status: MessageStatus.SENT,
+          timestamp: 1706868000,
+          metadata: bulkRow.metadata,
+        }),
+      );
+      expect(saved).toEqual(expect.objectContaining({ id: 'echo-row' }));
+    });
+
+    it('does not overwrite the echo row’s downloaded bytes with a URL pointer', async () => {
+      // A wwjs echo carries the media it downloaded; a URL-based send carries only the URL string.
+      // Merging ours over theirs would discard bytes the gateway already holds — and leave a row
+      // the archive cannot use.
+      (repository.save as jest.Mock).mockRejectedValueOnce(uniqueViolation);
+      (repository.findOne as jest.Mock).mockResolvedValueOnce({ id: 'echo-row' });
+
+      await service.saveOutgoingMessage('sess-1', {
+        ...bulkRow,
+        metadata: { media: { mimetype: 'image/png', data: 'https://example.com/cat.png' } },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const patch = (repository.update as jest.Mock).mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(patch).not.toHaveProperty('metadata');
+    });
+
+    it('leaves the echo row metadata alone when this write carries none', async () => {
+      (repository.save as jest.Mock).mockRejectedValueOnce(uniqueViolation);
+      (repository.findOne as jest.Mock).mockResolvedValueOnce({ id: 'echo-row' });
+
+      await service.saveOutgoingMessage('sess-1', { ...bulkRow, type: 'text', metadata: undefined });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const patch = (repository.update as jest.Mock).mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(patch).not.toHaveProperty('metadata');
+    });
+
+    it('rethrows a transient (non-unique) persist error', async () => {
+      (repository.save as jest.Mock).mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'));
+
+      await expect(service.saveOutgoingMessage('sess-1', bulkRow)).rejects.toThrow('SQLITE_BUSY');
+      expect(repository.update).not.toHaveBeenCalled();
+    });
+
+    it('rethrows when there is no engine id to merge onto', async () => {
+      (repository.save as jest.Mock).mockRejectedValueOnce(uniqueViolation);
+
+      await expect(service.saveOutgoingMessage('sess-1', { chatId: '621@c.us', type: 'text' })).rejects.toThrow(
+        uniqueViolation,
+      );
+      expect(repository.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('persistSentState vs the own-send echo (dedup race)', () => {
     it('merges state onto the echo row, then drops the redundant PENDING row', async () => {
       // The engine's message_create echo (onMessageCreate) won the insert race, so the SENT-state save
-      // collides on UNIQUE(sessionId, waMessageId). The echo row carries only a media-less marker —
-      // the merge must land status/timestamp/metadata on it BEFORE the placeholder is deleted, or the
-      // payload is lost. The send still succeeds.
+      // collides on UNIQUE(sessionId, waMessageId). The echo row carries only what the engine reported
+      // — for a Baileys API send, a media-less marker — so the merge must land status/timestamp/metadata
+      // on it BEFORE the placeholder is deleted, or the payload is lost. The send still succeeds.
       (repository.save as jest.Mock)
         .mockImplementationOnce(msg => Promise.resolve(msg)) // saveOutgoingMessage (PENDING)
         .mockRejectedValueOnce(new Error('UNIQUE constraint failed: messages.sessionId, messages.waMessageId'));
@@ -1403,6 +1590,18 @@ describe('MessageService', () => {
       expect(repository.delete).toHaveBeenCalledWith({ id: 'msg-uuid-1' });
     });
 
+    it('keeps the echo row’s downloaded bytes rather than merging a URL pointer over them', async () => {
+      (repository.save as jest.Mock)
+        .mockImplementationOnce(msg => Promise.resolve(msg))
+        .mockRejectedValueOnce(new Error('UNIQUE constraint failed: messages.sessionId, messages.waMessageId'));
+
+      await service.sendImage('sess-1', { chatId: '621@c.us', url: 'https://example.com/cat.png' });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const patch = (repository.update as jest.Mock).mock.calls[0]?.[1] as Record<string, unknown> | undefined;
+      expect(patch).not.toHaveProperty('metadata');
+    });
+
     it('does NOT delete anything on a transient (non-unique) persist error', async () => {
       (repository.save as jest.Mock)
         .mockImplementationOnce(msg => Promise.resolve(msg))
@@ -1412,6 +1611,273 @@ describe('MessageService', () => {
 
       expect(result.messageId).toBe('wa-msg-1'); // transient persist faults never fail the send
       expect(repository.delete).not.toHaveBeenCalled();
+    });
+  });
+  // ── pin / unpin ───────────────────────────────────────────────────
+
+  describe('pinMessage / unpinMessage', () => {
+    it('defaults the pin window to 24h when the caller does not choose one', async () => {
+      await service.pinMessage('sess-1', { chatId: '621@c.us', messageId: 'M1' });
+      expect(mockEngine.pinMessage).toHaveBeenCalledWith('621@c.us', 'M1', 86400);
+    });
+
+    it('passes an explicit window through untouched', async () => {
+      await service.pinMessage('sess-1', { chatId: '621@c.us', messageId: 'M1', durationSeconds: 2592000 });
+      expect(mockEngine.pinMessage).toHaveBeenCalledWith('621@c.us', 'M1', 2592000);
+    });
+
+    it('unpins without a duration', async () => {
+      await service.unpinMessage('sess-1', { chatId: '621@c.us', messageId: 'M1' });
+      expect(mockEngine.unpinMessage).toHaveBeenCalledWith('621@c.us', 'M1');
+    });
+
+    it('does not touch the stored message row — a pin is WhatsApp-owned chat state that expires', async () => {
+      (repository.update as jest.Mock).mockClear();
+      await service.pinMessage('sess-1', { chatId: '621@c.us', messageId: 'M1' });
+      expect(repository.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('votePoll', () => {
+    it('passes the option texts through unchanged', async () => {
+      await service.votePoll('sess-1', { chatId: '621@c.us', pollMessageId: 'P1', options: ['A', 'B'] });
+      expect(mockEngine.votePoll).toHaveBeenCalledWith('621@c.us', 'P1', ['A', 'B']);
+    });
+
+    it('forwards an empty selection, which clears the vote rather than being a no-op', async () => {
+      await service.votePoll('sess-1', { chatId: '621@c.us', pollMessageId: 'P1', options: [] });
+      expect(mockEngine.votePoll).toHaveBeenCalledWith('621@c.us', 'P1', []);
+    });
+  });
+
+  describe('starMessage', () => {
+    it.each([true, false])('passes star=%s straight through to the engine', async star => {
+      await service.starMessage('sess-1', { chatId: '621@c.us', messageId: 'M1', star });
+      expect(mockEngine.starMessage).toHaveBeenCalledWith('621@c.us', 'M1', star);
+    });
+  });
+
+  // ── archived chat media (read path) ───────────────────────────────
+
+  describe('getChatMedia', () => {
+    const archived = (mimetype: string) => ({
+      getMedia: jest.fn().mockResolvedValue({ path: 'chat-media/sess-1/abc.bin', mimetype }),
+    });
+    const storage = (buffer = Buffer.from('BYTES')) => ({ getFile: jest.fn().mockResolvedValue(buffer) });
+
+    const build = (archive: unknown, store: unknown): MessageService =>
+      new MessageService(
+        repository as Repository<Message>,
+        sessionService as unknown as SessionService,
+        engines,
+        messageProjector as unknown as MessageProjector,
+        hookManager as HookManager,
+        templateService as unknown as TemplateService,
+        lidMappingStore as unknown as LidMappingStoreService,
+        inertPacing(),
+        undefined,
+        archive as never,
+        store as never,
+      );
+
+    it('serves an inert image type unchanged', async () => {
+      const svc = build(archived('image/jpeg'), storage());
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('BYTES'),
+        mimetype: 'image/jpeg',
+      });
+    });
+
+    it.each([
+      ['image/svg+xml', 'scriptable despite the image/ prefix'],
+      ['text/html', 'a document a sender chose the type of'],
+      ['application/pdf', 'renderable by the browser plugin'],
+      ['application/javascript', 'outright active content'],
+    ])('downgrades %s to octet-stream (%s)', async mimetype => {
+      const svc = build(archived(mimetype), storage());
+      const { mimetype: served } = await svc.getChatMedia('sess-1', 'c@c.us', 'wa-1');
+      expect(served).toBe('application/octet-stream');
+    });
+
+    it('404s when nothing is archived for the message', async () => {
+      const svc = build({ getMedia: jest.fn().mockResolvedValue(null) }, storage());
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow(NotFoundException);
+    });
+
+    it.each([
+      ['local ENOENT', Object.assign(new Error('missing'), { code: 'ENOENT' })],
+      // S3 reports a miss with a .name and NO .code — an ENOENT-only check turned this into a 500
+      // on the one backend where retention/lifecycle rules make a missing object most likely.
+      ['S3 NoSuchKey', Object.assign(new Error('NoSuchKey'), { name: 'NoSuchKey' })],
+      ['S3 NotFound', Object.assign(new Error('NotFound'), { name: 'NotFound' })],
+      ['S3 404 metadata', Object.assign(new Error('gone'), { $metadata: { httpStatusCode: 404 } })],
+    ])('404s when the row outlived its file (%s)', async (_label, err) => {
+      const svc = build(archived('image/png'), { getFile: jest.fn().mockRejectedValue(err) });
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow(NotFoundException);
+    });
+
+    // ── outbound archiving (CHAT_MEDIA_ARCHIVE_OUTBOUND) ─────────────
+
+    describe('archiving media this account sent', () => {
+      const withFlag = (archiveOutbound: boolean, archive: { archive: jest.Mock }): MessageService =>
+        new MessageService(
+          repository as Repository<Message>,
+          sessionService as unknown as SessionService,
+          engines,
+          messageProjector as unknown as MessageProjector,
+          hookManager as HookManager,
+          templateService as unknown as TemplateService,
+          lidMappingStore as unknown as LidMappingStoreService,
+          inertPacing(),
+          {
+            get: (key: string, fallback?: unknown) =>
+              key === 'chatMedia.archiveOutbound' ? archiveOutbound : fallback,
+          } as never,
+          archive as never,
+          undefined,
+        );
+
+      it('archives a SENT outbound row when the flag is on', async () => {
+        const archive = { archive: jest.fn().mockResolvedValue('chat-media/k') };
+        const svc = withFlag(true, archive);
+
+        await svc.saveOutgoingMessage('sess-1', {
+          waMessageId: 'wa-1',
+          chatId: '621@c.us',
+          type: 'image',
+          status: MessageStatus.SENT,
+          metadata: { media: { mimetype: 'image/png', data: 'QUJD' } },
+        });
+
+        expect(archive.archive).toHaveBeenCalledWith(expect.objectContaining({ waMessageId: 'wa-1' }));
+      });
+
+      it('archives nothing while the flag is off', async () => {
+        const archive = { archive: jest.fn() };
+        const svc = withFlag(false, archive);
+
+        await svc.saveOutgoingMessage('sess-1', {
+          waMessageId: 'wa-1',
+          chatId: '621@c.us',
+          type: 'image',
+          status: MessageStatus.SENT,
+          metadata: { media: { mimetype: 'image/png', data: 'QUJD' } },
+        });
+
+        expect(archive.archive).not.toHaveBeenCalled();
+      });
+
+      it('never archives a PENDING row — the merge may delete it and the reaper may rewrite it', async () => {
+        const archive = { archive: jest.fn() };
+        const svc = withFlag(true, archive);
+
+        await svc.saveOutgoingMessage('sess-1', {
+          chatId: '621@c.us',
+          type: 'image',
+          metadata: { media: { mimetype: 'image/png', data: 'QUJD' } },
+        });
+
+        expect(archive.archive).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not swallow a genuine storage fault as a 404', async () => {
+      const svc = build(archived('image/png'), { getFile: jest.fn().mockRejectedValue(new Error('S3 500')) });
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow('S3 500');
+    });
+
+    // ── inline fallback (sent-message media, #1165) ──────────────────
+
+    const inlineRow = (media: Record<string, unknown>) => ({ id: 'msg-uuid-1', metadata: { media } });
+    const noArchive = () => ({ getMedia: jest.fn().mockResolvedValue(null) });
+
+    it('serves the inline row copy when nothing is archived', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'image/jpeg', data: Buffer.from('INLINE').toString('base64') }),
+      );
+      const svc = build(noArchive(), storage());
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('INLINE'),
+        mimetype: 'image/jpeg',
+      });
+      expect(repository.findOne).toHaveBeenCalledWith({
+        where: { sessionId: 'sess-1', chatId: In(['c@c.us', 'c@s.whatsapp.net']), waMessageId: 'wa-1' },
+      });
+    });
+
+    it('looks the row up across chatId dialects — outbound rows store the literal or the neutral form by race', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'image/jpeg', data: Buffer.from('SENT').toString('base64') }),
+      );
+      const svc = build(noArchive(), storage());
+      await expect(svc.getChatMedia('sess-1', '628123456789@s.whatsapp.net', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('SENT'),
+        mimetype: 'image/jpeg',
+      });
+      expect(repository.findOne).toHaveBeenCalledWith({
+        where: {
+          sessionId: 'sess-1',
+          chatId: In(['628123456789@s.whatsapp.net', '628123456789@c.us']),
+          waMessageId: 'wa-1',
+        },
+      });
+    });
+
+    it('prefers the archived file over the inline copy when both exist', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'image/png', data: Buffer.from('INLINE').toString('base64') }),
+      );
+      const svc = build(archived('image/png'), storage(Buffer.from('ARCHIVE-BYTES')));
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('ARCHIVE-BYTES'),
+        mimetype: 'image/png',
+      });
+    });
+
+    it('downgrades an active inline mimetype to octet-stream, matching the archive path', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'text/html', data: Buffer.from('<img>').toString('base64') }),
+      );
+      const svc = build(noArchive(), storage());
+      const { mimetype: served } = await svc.getChatMedia('sess-1', 'c@c.us', 'wa-1');
+      expect(served).toBe('application/octet-stream');
+    });
+
+    it.each([
+      // A URL-based send persists the URL STRING in metadata.media.data (buildMediaInput:
+      // `data: base64 || dto.url!`) — decoding it as base64 would serve garbage bytes.
+      ['a URL string from a url-based send', { mimetype: 'image/png', data: 'https://example.com/cat.png' }],
+      ['the omitted marker', { mimetype: 'image/png', omitted: true, sizeBytes: 99 }],
+      ['a payload with no mimetype', { data: Buffer.from('X').toString('base64') }],
+      ['a media object with no data', { mimetype: 'image/png' }],
+    ])('404s when the inline copy is %s', async (_label, media) => {
+      (repository.findOne as jest.Mock).mockResolvedValue(inlineRow(media));
+      const svc = build(noArchive(), storage());
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).rejects.toThrow(NotFoundException);
+    });
+
+    it('falls back to the inline copy when the archived file was purged by retention', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'image/jpeg', data: Buffer.from('STILL-HERE').toString('base64') }),
+      );
+      const svc = build(archived('image/jpeg'), {
+        getFile: jest.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' })),
+      });
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('STILL-HERE'),
+        mimetype: 'image/jpeg',
+      });
+    });
+
+    it('serves the inline copy when no storage backend is configured', async () => {
+      (repository.findOne as jest.Mock).mockResolvedValue(
+        inlineRow({ mimetype: 'image/jpeg', data: Buffer.from('INLINE').toString('base64') }),
+      );
+      const svc = build(archived('image/jpeg'), undefined);
+      await expect(svc.getChatMedia('sess-1', 'c@c.us', 'wa-1')).resolves.toEqual({
+        buffer: Buffer.from('INLINE'),
+        mimetype: 'image/jpeg',
+      });
     });
   });
 });

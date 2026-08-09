@@ -75,6 +75,24 @@ func (s *ContactsService) Phone(ctx context.Context, sessionID, contactID string
 }
 
 // Block blocks a contact.
+// Upsert saves a contact to the addressbook, or edits an existing entry.
+func (s *ContactsService) Upsert(ctx context.Context, sessionID, contactID string, body UpsertContactRequest) (*SuccessResult, error) {
+	var out SuccessResult
+	if err := s.client.do(ctx, "PUT", s.base(sessionID)+"/"+pathEscape(contactID), nil, body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Delete removes a contact from the addressbook.
+func (s *ContactsService) Delete(ctx context.Context, sessionID, contactID string) (*SuccessResult, error) {
+	var out SuccessResult
+	if err := s.client.do(ctx, "DELETE", s.base(sessionID)+"/"+pathEscape(contactID), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (s *ContactsService) Block(ctx context.Context, sessionID, contactID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(contactID)+"/block", nil, nil, &out)

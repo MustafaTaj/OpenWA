@@ -1,14 +1,20 @@
 import { BadRequestException, HttpException, NotFoundException } from '@nestjs/common';
 import { GroupService } from './group.service';
-import { SessionService } from '../session/session.service';
+import { EngineRegistry } from '../../engine/engine-registry.service';
 import { IWhatsAppEngine } from '../../engine/interfaces/whatsapp-engine.interface';
 import { EngineNotSupportedError } from '../../common/errors/engine-not-supported.error';
 import { EngineRefusedError } from '../../common/errors/engine-refused.error';
+import { SendPacingService } from '../message/send-pacing.service';
+
+/** Pacing is off by default; its own spec covers the governor, so here it must simply not refuse. */
+const inertPacing = (): SendPacingService =>
+  ({ assertReachoutAllowed: jest.fn().mockResolvedValue(undefined) }) as unknown as SendPacingService;
 
 describe('GroupService', () => {
-  const makeService = (engine: Partial<IWhatsAppEngine> | undefined) => {
-    const sessionService = { getEngine: jest.fn().mockReturnValue(engine) } as unknown as SessionService;
-    return new GroupService(sessionService);
+  const makeService = (engine: Partial<IWhatsAppEngine> | undefined, pacing: SendPacingService = inertPacing()) => {
+    const engines = new EngineRegistry();
+    if (engine) engines.set('s1', engine as IWhatsAppEngine);
+    return new GroupService(engines, pacing);
   };
 
   it('throws 400 "Session is not started" when the engine is missing (guard preserved)', () => {
@@ -151,6 +157,30 @@ describe('GroupService', () => {
       expect(engine.setGroupInfoAdminsOnly).not.toHaveBeenCalled();
     });
 
+    it('keeps memberAddMode BEHIND ephemeralSeconds, so the deterministic 501 still fails first', async () => {
+      // memberAddMode is supported on both engines and therefore has no deterministic refusal.
+      // Ordering it ahead of ephemeralSeconds would reintroduce exactly the half-applied patch the
+      // rule above exists to prevent: the mode would land, then the ephemeral call would 501.
+      const engine = {
+        setGroupMemberAddMode: jest.fn().mockResolvedValue(undefined),
+        setGroupMessagesAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupInfoAdminsOnly: jest.fn().mockResolvedValue(undefined),
+        setGroupEphemeral: jest.fn().mockRejectedValue(new EngineNotSupportedError('setGroupEphemeral')),
+      };
+      const svc = makeService(engine);
+      await expect(
+        svc.updateGroupSettings('s1', 'g1', { memberAddMode: 'admins', ephemeralSeconds: 86400 }),
+      ).rejects.toBeInstanceOf(EngineNotSupportedError);
+      expect(engine.setGroupMemberAddMode).not.toHaveBeenCalled();
+    });
+
+    it('applies memberAddMode when it is the only field in the patch', async () => {
+      const engine = { setGroupMemberAddMode: jest.fn().mockResolvedValue(undefined) };
+      const svc = makeService(engine);
+      await svc.updateGroupSettings('s1', 'g1', { memberAddMode: 'all' });
+      expect(engine.setGroupMemberAddMode).toHaveBeenCalledWith('g1', 'all');
+    });
+
     it('names the failed field AND the applied ones when a patch partially applies', async () => {
       // ephemeralSeconds applied, then announce failed: the client must learn the group is now in a
       // mixed state (and which subset took effect), not receive a bare engine error.
@@ -182,5 +212,95 @@ describe('GroupService', () => {
       ).rejects.toBeInstanceOf(EngineRefusedError);
       expect(engine.setGroupMessagesAdminsOnly).not.toHaveBeenCalled();
     });
+  });
+});
+
+// A preview must never look like membership: it reports a count, never a participant list, and it
+// changes nothing about the account.
+describe('GroupService join-info preview', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine>) => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return new GroupService(engines, inertPacing());
+  };
+
+  it('delegates the trimmed code to the engine', async () => {
+    const getGroupJoinInfo = jest.fn().mockResolvedValue({ id: 'g@g.us', name: 'Team' });
+
+    await makeService({ getGroupJoinInfo }).getGroupJoinInfo('s1', '  ABC123  ');
+
+    expect(getGroupJoinInfo).toHaveBeenCalledWith('ABC123');
+  });
+
+  // An empty code would otherwise reach the engine and come back as a confusing not-found rather
+  // than the client error it plainly is.
+  it.each(['', '   ', undefined])('rejects a missing code (%p) before reaching the engine', code => {
+    const getGroupJoinInfo = jest.fn();
+
+    expect(() => makeService({ getGroupJoinInfo }).getGroupJoinInfo('s1', code as string)).toThrow(BadRequestException);
+    expect(getGroupJoinInfo).not.toHaveBeenCalled();
+  });
+
+  it('throws 400 when the session is not started', () => {
+    expect(() => new GroupService(new EngineRegistry(), inertPacing()).getGroupJoinInfo('s1', 'ABC')).toThrow(
+      BadRequestException,
+    );
+  });
+});
+
+describe('GroupService membership requests', () => {
+  const makeService = (engine: Partial<IWhatsAppEngine>, pacing: SendPacingService = inertPacing()) => {
+    const engines = new EngineRegistry();
+    engines.set('s1', engine as IWhatsAppEngine);
+    return { svc: new GroupService(engines, pacing), pacing };
+  };
+
+  it('delegates the pending-request list to the engine', async () => {
+    const requests = [{ participantId: '628111@c.us', method: 'invite_link', requestedAt: 1754700000 }];
+    const getGroupMembershipRequests = jest.fn().mockResolvedValue(requests);
+
+    const { svc } = makeService({ getGroupMembershipRequests });
+
+    await expect(svc.getGroupMembershipRequests('s1', 'g1')).resolves.toEqual(requests);
+    expect(getGroupMembershipRequests).toHaveBeenCalledWith('g1');
+  });
+
+  it.each([['approveGroupMembershipRequests' as const], ['rejectGroupMembershipRequests' as const]])(
+    '%s forwards the named participants and the results verbatim',
+    async method => {
+      const results = [{ id: '628111@c.us', success: true, status: 200 }];
+      const engineFn = jest.fn().mockResolvedValue(results);
+
+      const { svc } = makeService({ [method]: engineFn });
+
+      await expect(svc[method]('s1', 'g1', ['628111@c.us'])).resolves.toEqual(results);
+      expect(engineFn).toHaveBeenCalledWith('g1', ['628111@c.us']);
+    },
+  );
+
+  it('passes an omitted participant list through as undefined (approve/reject ALL pending)', async () => {
+    const approveGroupMembershipRequests = jest.fn().mockResolvedValue([]);
+
+    const { svc } = makeService({ approveGroupMembershipRequests });
+
+    await expect(svc.approveGroupMembershipRequests('s1', 'g1')).resolves.toEqual([]);
+    expect(approveGroupMembershipRequests).toHaveBeenCalledWith('g1', undefined);
+  });
+
+  it('does NOT draw on the cold-reachout budget — the requesters asked for the contact', async () => {
+    const approveGroupMembershipRequests = jest.fn().mockResolvedValue([]);
+    const assertReachoutAllowed = jest.fn().mockResolvedValue(undefined);
+
+    const { svc } = makeService({ approveGroupMembershipRequests }, {
+      assertReachoutAllowed,
+    } as unknown as SendPacingService);
+    await svc.approveGroupMembershipRequests('s1', 'g1', ['628111@c.us']);
+
+    expect(assertReachoutAllowed).not.toHaveBeenCalled();
+  });
+
+  it('throws 400 when the session is not started', () => {
+    const svc = new GroupService(new EngineRegistry(), inertPacing());
+    expect(() => svc.getGroupMembershipRequests('s1', 'g1')).toThrow(BadRequestException);
   });
 });

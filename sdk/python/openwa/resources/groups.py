@@ -5,10 +5,12 @@ Backed by ``src/modules/group/group.controller.ts``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypedDict
+from typing import Any, TYPE_CHECKING, TypedDict
 
 from .._http import quote_segment
 from ..types import (
+    GroupJoinInfo,
+    SetGroupPictureRequest,
     CreateGroupRequest,
     GroupInfo,
     GroupSettings,
@@ -16,6 +18,7 @@ from ..types import (
     InviteCodeResponse,
     JoinGroupRequest,
     JoinGroupResponse,
+    ParticipantsResult,
     SuccessResult,
 )
 
@@ -38,28 +41,33 @@ class GroupsResource:
     def get(self, session_id: str, group_id: str) -> GroupInfo:
         return self._http.request("GET", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}")
 
-    def create(self, session_id: str, body: CreateGroupRequest) -> GroupInfo:
+    def create(self, session_id: str, body: CreateGroupRequest) -> GroupSummary:
+        """Create a group.
+
+        Answers the group SUMMARY, not the detail shape ``get()`` returns -- no participant list,
+        description, owner or creation time.
+        """
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/groups", body=body)
 
-    def add_participants(self, session_id: str, group_id: str, participants: list[str]) -> SuccessResult:
+    def add_participants(self, session_id: str, group_id: str, participants: list[str]) -> ParticipantsResult:
         return self._http.request(
             "POST", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/participants",
             body={"participants": participants},
         )
 
-    def remove_participants(self, session_id: str, group_id: str, participants: list[str]) -> SuccessResult:
+    def remove_participants(self, session_id: str, group_id: str, participants: list[str]) -> ParticipantsResult:
         return self._http.request(
             "DELETE", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/participants",
             body={"participants": participants},
         )
 
-    def promote_participants(self, session_id: str, group_id: str, participants: list[str]) -> SuccessResult:
+    def promote_participants(self, session_id: str, group_id: str, participants: list[str]) -> ParticipantsResult:
         return self._http.request(
             "POST", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/participants/promote",
             body={"participants": participants},
         )
 
-    def demote_participants(self, session_id: str, group_id: str, participants: list[str]) -> SuccessResult:
+    def demote_participants(self, session_id: str, group_id: str, participants: list[str]) -> ParticipantsResult:
         return self._http.request(
             "POST", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/participants/demote",
             body={"participants": participants},
@@ -79,6 +87,24 @@ class GroupsResource:
     def leave(self, session_id: str, group_id: str) -> SuccessResult:
         return self._http.request("POST", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/leave")
 
+    def get_picture(self, session_id: str, group_id: str) -> dict[str, Any]:
+        """Get the group's picture URL (None when it has none)."""
+        return self._http.request(
+            "GET", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/picture"
+        )
+
+    def set_picture(self, session_id: str, group_id: str, body: SetGroupPictureRequest) -> SuccessResult:
+        """Set the group's picture. Requires admin rights on the group."""
+        return self._http.request(
+            "PUT", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/picture", body=body
+        )
+
+    def delete_picture(self, session_id: str, group_id: str) -> SuccessResult:
+        """Remove the group's picture. Requires admin rights on the group."""
+        return self._http.request(
+            "DELETE", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/picture"
+        )
+
     def invite_code(self, session_id: str, group_id: str) -> InviteCodeResponse:
         return self._http.request(
             "GET", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/invite-code"
@@ -87,6 +113,16 @@ class GroupsResource:
     def revoke_invite_code(self, session_id: str, group_id: str) -> InviteCodeResponse:
         return self._http.request(
             "POST", f"/api/sessions/{quote_segment(session_id)}/groups/{quote_segment(group_id)}/invite-code/revoke"
+        )
+
+    def join_info(self, session_id: str, code: str) -> GroupJoinInfo:
+        """Preview a group from its invite code, WITHOUT joining.
+
+        Read-only, so it is safe to call on a code from an untrusted source. There is no participant
+        list -- the account is not a member -- only a count, and only when WhatsApp discloses one.
+        """
+        return self._http.request(
+            "GET", f"/api/sessions/{quote_segment(session_id)}/groups/join-info", query={"code": code}
         )
 
     def join_group(self, session_id: str, body: JoinGroupRequest) -> JoinGroupResponse:

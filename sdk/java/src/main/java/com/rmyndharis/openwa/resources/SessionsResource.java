@@ -5,11 +5,14 @@ import static com.rmyndharis.openwa.http.Http.encodeSegment;
 import com.rmyndharis.openwa.OpenWAClient;
 import com.rmyndharis.openwa.http.HttpMethod;
 import com.rmyndharis.openwa.model.CreateSessionRequest;
+import com.rmyndharis.openwa.model.ListSessionsQuery;
 import com.rmyndharis.openwa.model.PairingCodeResponse;
 import com.rmyndharis.openwa.model.QrCodeResponse;
 import com.rmyndharis.openwa.model.RequestPairingCodeRequest;
+import com.rmyndharis.openwa.model.SessionConfig;
 import com.rmyndharis.openwa.model.SessionResponse;
 import com.rmyndharis.openwa.model.SessionStatsOverview;
+import com.rmyndharis.openwa.model.UpdateSessionConfigRequest;
 import java.util.List;
 
 /** Sessions resource — lifecycle management for WhatsApp sessions. */
@@ -22,7 +25,27 @@ public final class SessionsResource {
 
     /** List all sessions (scoped to the API key's allowed sessions). */
     public List<SessionResponse> list() {
-        return client.requestList(HttpMethod.GET, "/api/sessions", null, null, SessionResponse.class);
+        return list(null);
+    }
+
+    /** List sessions, applying the given pagination query. */
+    public List<SessionResponse> list(ListSessionsQuery query) {
+        return client.requestList(HttpMethod.GET, "/api/sessions", query, null, SessionResponse.class);
+    }
+
+    /** Read a session's effective configuration. */
+    public SessionConfig getConfig(String id) {
+        return client.request(
+                HttpMethod.GET, "/api/sessions/" + encodeSegment(id) + "/config", null, null, SessionConfig.class);
+    }
+
+    /**
+     * Update a RUNNING session's configuration. Takes effect without re-linking the account — all
+     * three fields were fixed at creation before this route existed.
+     */
+    public SessionConfig updateConfig(String id, UpdateSessionConfigRequest body) {
+        return client.request(
+                HttpMethod.PATCH, "/api/sessions/" + encodeSegment(id) + "/config", null, body, SessionConfig.class);
     }
 
     /** Get a single session by id. */
@@ -48,6 +71,22 @@ public final class SessionsResource {
     /** Stop a session and disconnect gracefully. */
     public SessionResponse stop(String id) {
         return client.request(HttpMethod.POST, "/api/sessions/" + encodeSegment(id) + "/stop", null, null, SessionResponse.class);
+    }
+
+    /**
+     * Attempt an engine-native unlink of this device, then stop the session. A {@code 200} means the
+     * unlink operation AND the required local credential cleanup completed — it is not an
+     * independent observation that the handset UI no longer shows the linked device. Because a
+     * completed unlink wipes the stored credentials, a later {@code start} requires a fresh QR scan
+     * or pairing code. Requires a running session. Throws on HTTP {@code 502} with
+     * {@code code: 'SESSION_LOGOUT_INCOMPLETE'} when the session was stopped locally but the logout
+     * operation did not complete (no send, no acknowledgement, timeout/transport error, or local
+     * cleanup failure); {@code phone} is cleared and no success audit is written. Start the session
+     * again and retry the logout; do not assume the retry reconnects automatically or lands in a
+     * guaranteed QR state.
+     */
+    public SessionResponse logout(String id) {
+        return client.request(HttpMethod.POST, "/api/sessions/" + encodeSegment(id) + "/logout", null, null, SessionResponse.class);
     }
 
     /** Force-kill a stuck session (SIGKILL + teardown). */

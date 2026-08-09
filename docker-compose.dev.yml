@@ -80,12 +80,30 @@ services:
       - STORAGE_TYPE=${STORAGE_TYPE:-local}
       - STORAGE_LOCAL_PATH=${STORAGE_LOCAL_PATH:-/app/data/media}
       # Install plugins into the writable, persistent data volume (the root FS is read-only). Matches
-      # docker-compose.yml; without this it falls back to ./plugins on the read-only root and install fails.
+      # docker-compose.yml and the application default; set explicitly so the path stays correct even
+      # if the volume moves.
       - PLUGINS_DIR=${PLUGINS_DIR:-/app/data/plugins}
+      # Plugin install-from-URL redirect policy (ssrf-guard): off unless the exact string 'true'.
+      - PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS=${PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS:-false}
       - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10000}
       - WEBHOOK_RETRY_DELAY=${WEBHOOK_RETRY_DELAY:-5000}
       - WEBHOOK_DISPATCH_CONCURRENCY=${WEBHOOK_DISPATCH_CONCURRENCY:-16}
       - WEBHOOK_DISPATCH_MAX_QUEUED=${WEBHOOK_DISPATCH_MAX_QUEUED:-1000}
+      # Mirrors docker-compose.yml: flags with no dashboard route, which a .env value could not
+      # otherwise reach the container at all.
+      - WEBHOOK_CONTACT_DETAILS=${WEBHOOK_CONTACT_DETAILS:-}
+      - BAILEYS_MARK_ONLINE_ON_CONNECT=${BAILEYS_MARK_ONLINE_ON_CONNECT:-}
+      - BAILEYS_SYNC_FULL_HISTORY=${BAILEYS_SYNC_FULL_HISTORY:-}
+      - ALLOW_UNSIGNED_INGRESS=${ALLOW_UNSIGNED_INGRESS:-}
+      - STORE_EPHEMERAL_MESSAGES=${STORE_EPHEMERAL_MESSAGES:-}
+      - RESOLVE_LID_TO_PHONE=${RESOLVE_LID_TO_PHONE:-}
+      - SIMULATE_TYPING=${SIMULATE_TYPING:-}
+      - MCP_ENABLED=${MCP_ENABLED:-}
+      - SEARCH_ENABLED=${SEARCH_ENABLED:-}
+      - SERVE_DASHBOARD=${SERVE_DASHBOARD:-}
+      - CACHE_ENABLED=${CACHE_ENABLED:-}
+      - DATABASE_LOGGING=${DATABASE_LOGGING:-}
+      - MAIN_DATABASE_SYNCHRONIZE=${MAIN_DATABASE_SYNCHRONIZE:-}
       - RATE_LIMIT_SHORT_TTL=${RATE_LIMIT_SHORT_TTL:-}
       - RATE_LIMIT_SHORT_LIMIT=${RATE_LIMIT_SHORT_LIMIT:-}
       - RATE_LIMIT_MEDIUM_TTL=${RATE_LIMIT_MEDIUM_TTL:-}
@@ -97,6 +115,31 @@ services:
       - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-}
       - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
       - QUEUE_ENABLED=${QUEUE_ENABLED:-false}
+      # Opt-in feature flags. Forwarded explicitly for the same reason as docker-compose.yml: this
+      # file has no env_file, so a variable absent from this list never reaches the container and
+      # the feature it gates stays off however the operator's .env is written.
+      - CHAT_MEDIA_ARCHIVE_ENABLED=${CHAT_MEDIA_ARCHIVE_ENABLED:-}
+      - CHAT_MEDIA_ARCHIVE_OUTBOUND=${CHAT_MEDIA_ARCHIVE_OUTBOUND:-}
+      - CHAT_MEDIA_ARCHIVE_MAX_BYTES=${CHAT_MEDIA_ARCHIVE_MAX_BYTES:-}
+      - CHAT_MEDIA_ARCHIVE_TTL_DAYS=${CHAT_MEDIA_ARCHIVE_TTL_DAYS:-}
+      - CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS=${CHAT_MEDIA_ORPHAN_SWEEP_INTERVAL_MS:-}
+      - CHAT_MEDIA_ORPHAN_GRACE_MS=${CHAT_MEDIA_ORPHAN_GRACE_MS:-}
+      - SEND_PACING_ENABLED=${SEND_PACING_ENABLED:-}
+      - SEND_PACING_WARMUP_SCHEDULE=${SEND_PACING_WARMUP_SCHEDULE:-}
+      - SEND_PACING_COLD_DAILY_CAP=${SEND_PACING_COLD_DAILY_CAP:-}
+      - SEND_PACING_BREAKER_THRESHOLD=${SEND_PACING_BREAKER_THRESHOLD:-}
+      - SEND_PACING_BREAKER_COOLDOWN_MS=${SEND_PACING_BREAKER_COOLDOWN_MS:-}
+      - MEDIA_CONVERSION_ENABLED=${MEDIA_CONVERSION_ENABLED:-}
+      - FFMPEG_PATH=${FFMPEG_PATH:-}
+      - MEDIA_CONVERSION_TIMEOUT_MS=${MEDIA_CONVERSION_TIMEOUT_MS:-}
+      - MEDIA_CONVERSION_MAX_OUTPUT_BYTES=${MEDIA_CONVERSION_MAX_OUTPUT_BYTES:-}
+      - MEDIA_CONVERSION_CONCURRENCY=${MEDIA_CONVERSION_CONCURRENCY:-}
+      - NODE_ID=${NODE_ID:-}
+      - NODE_URL=${NODE_URL:-}
+      - SESSION_LEASE_TTL_MS=${SESSION_LEASE_TTL_MS:-}
+      - SESSION_LEASE_HEARTBEAT_MS=${SESSION_LEASE_HEARTBEAT_MS:-}
+      - SESSION_TAKEOVER_SWEEP_MS=${SESSION_TAKEOVER_SWEEP_MS:-}
+      - SESSION_PROXY_TIMEOUT_MS=${SESSION_PROXY_TIMEOUT_MS:-}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

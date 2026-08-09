@@ -8,6 +8,7 @@
 import { encodeSegment } from '../http.js';
 import type { OpenWAClient } from '../client.js';
 import type {
+  UpsertContactRequest,
   CheckNumberResponse,
   ContactPhoneResponse,
   ContactRecord,
@@ -82,6 +83,26 @@ export class ContactsResource {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}/block`,
+    });
+  }
+
+  /**
+   * Save a contact to the account's addressbook, or edit an existing entry.
+   * Requires an OPERATOR-level key.
+   */
+  upsert(sessionId: string, contactId: string, body: UpsertContactRequest): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'PUT',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}`,
+      body,
+    });
+  }
+
+  /** Remove a contact from the account's addressbook. Requires an OPERATOR-level key. */
+  delete(sessionId: string, contactId: string): Promise<SuccessResult> {
+    return this.client.request<SuccessResult>({
+      method: 'DELETE',
+      path: `/api/sessions/${encodeSegment(sessionId)}/contacts/${encodeSegment(contactId)}`,
     });
   }
 
